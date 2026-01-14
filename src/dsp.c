@@ -840,6 +840,8 @@ INLINE void DSPExec(int32_t cycles)
 		dsp_control &= ~0x10;
 	}
 #endif
+
+	cycles = (int32_t)((float)cycles * g_dsp_clock_multiplier);
 	dsp_releaseTimeSlice_flag = 0;
 	dsp_in_exec++;
 

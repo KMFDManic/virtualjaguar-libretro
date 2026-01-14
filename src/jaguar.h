@@ -44,12 +44,25 @@ extern uint32_t jaguarMainROMCRC32, jaguarROMSize, jaguarRunAddress;
 }
 #endif
 
+extern float g_dsp_clock_multiplier;
+
 // Various clock rates
 
-#define M68K_CLOCK_RATE_PAL		13296950
+extern float g_cpu_clock_multiplier;
+
+#define M68K_CLOCK_RATE_PAL	13296950
 #define M68K_CLOCK_RATE_NTSC	13295453
-#define RISC_CLOCK_RATE_PAL		26593900
+#define RISC_CLOCK_RATE_PAL	26593900
 #define RISC_CLOCK_RATE_NTSC	26590906
+
+// Helper functions to scale the clock rates
+inline unsigned int GetM68KClockRate(bool is_pal) {
+    return (unsigned int)(is_pal ? M68K_CLOCK_RATE_PAL : M68K_CLOCK_RATE_NTSC) * g_cpu_clock_multiplier;
+}
+
+inline unsigned int GetRISCClockRate(bool is_pal) {
+    return (unsigned int)(is_pal ? RISC_CLOCK_RATE_PAL : RISC_CLOCK_RATE_NTSC) * g_cpu_clock_multiplier;
+}
 
 // Stuff for IRQ handling
 

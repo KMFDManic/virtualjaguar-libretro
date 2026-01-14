@@ -39,6 +39,15 @@ retro_audio_sample_batch_t audio_batch_cb;
 
 static bool libretro_supports_bitmasks = false;
 
+static int g_frameskip = 0;
+static int g_frame_counter = 0;
+
+float g_cpu_clock_multiplier = 1.0f;
+
+float g_dsp_clock_multiplier = 1.0f;
+
+double g_time_slice_divisor = 1.0;
+
 void retro_set_video_refresh(retro_video_refresh_t cb) { video_cb = cb; }
 void retro_set_audio_sample(retro_audio_sample_t cb) { (void)cb; }
 void retro_set_audio_sample_batch(retro_audio_sample_batch_t cb) { audio_batch_cb = cb; }
@@ -302,6 +311,53 @@ static void check_variables(void)
          vjs.useFastBlitter = false;
    }
 
+   var.key = "virtualjaguar_frameskip";
+   var.value = NULL;
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+   if (strcmp(var.value, "0") == 0)
+      g_frameskip = 0;
+   else if (strcmp(var.value, "1") == 0)
+      g_frameskip = 1;
+   else if (strcmp(var.value, "2") == 0)
+      g_frameskip = 2;
+   else if (strcmp(var.value, "3") == 0)
+      g_frameskip = 3;
+   else if (strcmp(var.value, "4") == 0)
+      g_frameskip = 4;
+   else if (strcmp(var.value, "5") == 0)
+      g_frameskip = 5;
+   else if (strcmp(var.value, "6") == 0)
+      g_frameskip = 6;
+   else if (strcmp(var.value, "7") == 0)
+      g_frameskip = 7;
+   else if (strcmp(var.value, "8") == 0)
+      g_frameskip = 8;
+   else if (strcmp(var.value, "9") == 0)
+      g_frameskip = 9;
+   else if (strcmp(var.value, "10") == 0)
+      g_frameskip = 10;
+   else
+      g_frameskip = 0; // default fallback
+   }
+
+   var.key = "virtualjaguar_timeslice_divisor";
+   var.value = NULL;
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      g_time_slice_divisor = atof(var.value);
+   else
+      g_time_slice_divisor = 1.0; // fallback default
+
+   var.key = "virtualjaguar_dsp_clockscale";
+   var.value = NULL;
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      g_dsp_clock_multiplier = atof(var.value);
+   }
+  
    var.key = "virtualjaguar_doom_res_hack";
    var.value = NULL;
 
@@ -741,7 +797,7 @@ static struct retro_system_av_info g_av_info;
 void retro_get_system_info(struct retro_system_info *info)
 {
    memset(info, 0, sizeof(*info));
-   info->library_name     = "Virtual Jaguar";
+   info->library_name     = "VJag Xtreme Amped";
 #ifndef GIT_VERSION
 #define GIT_VERSION ""
 #endif
@@ -795,10 +851,20 @@ void retro_cheat_set(unsigned index, bool enabled, const char *code)
 
 bool retro_load_game(const struct retro_game_info *info)
 {
+   // First, check for variable updates (like frameskip, clock multiplier, etc.)
+   check_variables();  // <-- This checks core options like frameskip, clock multiplier
+
    char slash;
    unsigned i;
    const char *save_dir = NULL;
    enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_XRGB8888;
+
+   // Add CPU clock initialization here
+   bool is_pal = (vjs.hardwareTypeNTSC == 0);  // PAL or NTSC check
+
+   // Get the scaled clock rates based on the system type (PAL/NTSC) and the multiplier
+   unsigned int m68k_clock_rate = GetM68KClockRate(is_pal);
+   unsigned int risc_clock_rate = GetRISCClockRate(is_pal);
 
    struct retro_input_descriptor desc[] = {
       { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,  "D-Pad Left" },
@@ -994,19 +1060,28 @@ void retro_run(void)
    update_input();
 
    JaguarExecuteNew();
-   SoundCallback(NULL, sampleBuffer, vjs.hardwareTypeNTSC==1?BUFNTSC:BUFPAL);
+   SoundCallback(NULL, sampleBuffer, vjs.hardwareTypeNTSC == 1 ? BUFNTSC : BUFPAL);
 
-   // Resolution changed
-   if ((tomWidth != videoWidth || tomHeight != videoHeight) && tomWidth > 0 && tomHeight > 0)
+   bool do_render = (g_frame_counter % (g_frameskip + 1)) == 0;
+
+   if (do_render)
    {
-      videoWidth = tomWidth, videoHeight = tomHeight;
-      game_width = tomWidth, game_height = tomHeight;
+      if ((tomWidth != videoWidth || tomHeight != videoHeight) && tomWidth > 0 && tomHeight > 0)
+      {
+         videoWidth = tomWidth;
+         videoHeight = tomHeight;
+         game_width = tomWidth;
+         game_height = tomHeight;
 
-      JaguarSetScreenPitch(game_width);
+         JaguarSetScreenPitch(game_width);
 
-      retro_get_system_av_info(&g_av_info);
-      environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &g_av_info);
+         retro_get_system_av_info(&g_av_info);
+         environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &g_av_info);
+      }
+
+      video_cb(videoBuffer, game_width, game_height, game_width << 2);
    }
 
-   video_cb(videoBuffer, game_width, game_height, game_width << 2);
+   g_frame_counter++;
 }
+

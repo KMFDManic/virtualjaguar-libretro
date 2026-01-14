@@ -91,6 +91,100 @@ struct retro_core_option_v2_category option_cats_us[] = {
 };
 
 struct retro_core_option_v2_definition option_defs_us[] = {
+{
+   "virtualjaguar_timeslice_divisor",
+   "Xtreme Time Slice Divisor",
+   NULL,
+   "Modify how much time is processed per emulation cycle. Higher values increase performance (faster emulation), lower values reduce it. 1.0 is default.",
+   NULL,
+   NULL,
+   {
+      { "0.36",  NULL },
+      { "0.86",  NULL },
+      { "1.0",  NULL },
+      { "1.35",  NULL },
+      { "1.86",  NULL },
+      { "2.0",  NULL },
+      { "2.36",  NULL },
+      { "2.86",  NULL },
+      { "3.0",  NULL },
+      { "3.36",  NULL },
+      { "3.86",  NULL },
+      { "4.0",  NULL },
+      { "4.36",  NULL },
+      { "4.86",  NULL },
+      { "5.0",  NULL },
+      { "5.36",  NULL },
+      { "5.86",  NULL },
+      { "6.0",  NULL },
+      { "6.36",  NULL },
+      { "6.86",  NULL },
+      { "7.0",  NULL },
+      { "7.36",  NULL },
+      { "7.86",  NULL },
+      { "8.0",  NULL },
+      { "8.36",  NULL },
+      { "8.86",  NULL },
+      { "9.0",  NULL },
+      { "9.36",  NULL },
+      { "9.86",  NULL },
+      { "10.0",  NULL },
+      { "10.36",  NULL },
+      { "10.86",  NULL },
+      { "11.0",  NULL },
+      { "11.36",  NULL },
+      { "11.86",  NULL },
+      { "12.0",  NULL },
+      { "12.36",  NULL },
+      { "12.86",  NULL },
+      { "13.0",  NULL },
+      { "13.36",  NULL },
+      { "13.86",  NULL },
+      { "14.0",  NULL },
+      { "14.36",  NULL },
+      { "14.86",  NULL },
+      { "15.0",  NULL },
+      { NULL, NULL }
+   },
+   "2.86"
+   },
+   {
+   "virtualjaguar_frameskip",
+   "Xtreme Frameskip",
+   NULL,
+   "Set the number of frames to skip (0 = none, 10 = maximum)",
+   NULL,
+   NULL,
+   {
+      { "0", "None" },
+      { "1", "X1" },
+      { "2", "X2" },
+      { "3", "X3" },
+      { "4", "X4" },
+      { "5", "X5" },
+      { "6", "X6" },
+      { "7", "X7" },
+      { "8", "X8" },
+      { "9", "X9" },
+      { "10", "XX" },
+      { NULL, NULL }
+   },
+   "1"
+   },
+   {
+   "virtualjaguar_dsp_clockscale",
+   "Xtreme TurboBoost",
+   NULL,
+   "Toggle between Xtreme TurboBoost that is FAST with no sound, or Disabled, which is SLOW but WITH Sound.",
+   NULL,
+   NULL,
+   {
+      { "0.0",  "Enabled (Fast No Sound)" },
+      { "1.0",  "Disabled (Slow With Sound)" },
+       { NULL, NULL }
+   },
+   "0.0"
+   },
    {
       "virtualjaguar_usefastblitter",
       "Fast Blitter",
@@ -103,7 +197,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "enabled",  NULL },
          { NULL, NULL },
       },
-      "disabled"
+      "enabled"
    },
    {
       "virtualjaguar_doom_res_hack",
@@ -117,7 +211,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "enabled",  NULL },
          { NULL, NULL },
       },
-      "disabled"
+      "enabled"
    },
    {
       "virtualjaguar_bios",

@@ -674,6 +674,8 @@ uint8_t * GetRamPtr(void)
 
 /* New Jaguar execution stack
  * This executes 1 frame's worth of code. */
+extern double g_time_slice_divisor;
+
 void JaguarExecuteNew(void)
 {
    frameDone = false;
@@ -681,8 +683,11 @@ void JaguarExecuteNew(void)
    do
    {
       double timeToNextEvent = GetTimeToNextEvent(EVENT_MAIN);
+      timeToNextEvent /= g_time_slice_divisor;
+
       m68k_execute(USEC_TO_M68K_CYCLES(timeToNextEvent));
       GPUExec(USEC_TO_RISC_CYCLES(timeToNextEvent));
       HandleNextEvent(EVENT_MAIN);
-   } while(!frameDone);
+   } while (!frameDone);
 }
+
