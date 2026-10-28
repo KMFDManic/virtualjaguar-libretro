@@ -1,0 +1,2507 @@
+//
+// TOM Processing
+//
+// Originally by David Raingeard (cal2)
+// GCC/SDL port by Niels Wagenaar (Linux/WIN32) and Caz (BeOS)
+// Cleanups and endian wrongness amelioration by James Hammons
+// (C) 2010 Underground Software
+//
+// JLH = James Hammons <jlhamm@acm.org>
+//
+// Who  When        What
+// ---  ----------  -------------------------------------------------------------
+// JLH  01/16/2010  Created this log ;-)
+// JLH  01/20/2011  Change rendering to RGBA, removed unnecessary code
+//
+// Note: Endian wrongness probably stems from the MAME origins of this emu and
+//       the braindead way in which MAME used to handle memory. :-}
+//
+// Note: TOM has only a 16K memory space
+//
+//	------------------------------------------------------------
+//	TOM REGISTERS (Mapped by Aaron Giles)
+//	------------------------------------------------------------
+//	F00000-F0FFFF   R/W   xxxxxxxx xxxxxxxx   Internal Registers
+//	F00000          R/W   -x-xx--- xxxxxxxx   MEMCON1 - memory config reg 1
+//	                      -x------ --------      (CPU32 - is the CPU 32bits?)
+//	                      ---xx--- --------      (IOSPEED - external I/O clock cycles)
+//	                      -------- x-------      (FASTROM - reduces ROM clock cycles)
+//	                      -------- -xx-----      (DRAMSPEED - sets RAM clock cycles)
+//	                      -------- ---xx---      (ROMSPEED - sets ROM clock cycles)
+//	                      -------- -----xx-      (ROMWIDTH - sets width of ROM: 8,16,32,64 bits)
+//	                      -------- -------x      (ROMHI - controls ROM mapping)
+//	F00002          R/W   --xxxxxx xxxxxxxx   MEMCON2 - memory config reg 2
+//	                      --x----- --------      (HILO - image display bit order)
+//	                      ---x---- --------      (BIGEND - big endian addressing?)
+//	                      ----xxxx --------      (REFRATE - DRAM refresh rate)
+//	                      -------- xx------      (DWIDTH1 - DRAM1 width: 8,16,32,64 bits)
+//	                      -------- --xx----      (COLS1 - DRAM1 columns: 256,512,1024,2048)
+//	                      -------- ----xx--      (DWIDTH0 - DRAM0 width: 8,16,32,64 bits)
+//	                      -------- ------xx      (COLS0 - DRAM0 columns: 256,512,1024,2048)
+//	F00004          R/W   -----xxx xxxxxxxx   HC - horizontal count
+//	                      -----x-- --------      (which half of the display)
+//	                      ------xx xxxxxxxx      (10-bit counter)
+//	F00006          R/W   ----xxxx xxxxxxxx   VC - vertical count
+//	                      ----x--- --------      (which field is being generated)
+//	                      -----xxx xxxxxxxx      (11-bit counter)
+//	F00008          R     -----xxx xxxxxxxx   LPH - light pen horizontal position
+//	F0000A          R     -----xxx xxxxxxxx   LPV - light pen vertical position
+//	F00010-F00017   R     xxxxxxxx xxxxxxxx   OB - current object code from the graphics processor
+//	F00020-F00023     W   xxxxxxxx xxxxxxxx   OLP - start of the object list
+//	F00026            W   -------- -------x   OBF - object processor flag
+//	F00028            W   ----xxxx xxxxxxxx   VMODE - video mode
+//	                  W   ----xxx- --------      (PWIDTH1-8 - width of pixel in video clock cycles)
+//	                  W   -------x --------      (VARMOD - enable variable color resolution)
+//	                  W   -------- x-------      (BGEN - clear line buffer to BG color)
+//	                  W   -------- -x------      (CSYNC - enable composite sync on VSYNC)
+//	                  W   -------- --x-----      (BINC - local border color if INCEN)
+//	                  W   -------- ---x----      (INCEN - encrustation enable)
+//	                  W   -------- ----x---      (GENLOCK - enable genlock)
+//	                  W   -------- -----xx-      (MODE - CRY16,RGB24,DIRECT16,RGB16)
+//	                  W   -------- -------x      (VIDEN - enables video)
+//	F0002A            W   xxxxxxxx xxxxxxxx   BORD1 - border color (red/green)
+//	F0002C            W   -------- xxxxxxxx   BORD2 - border color (blue)
+//	F0002E            W   ------xx xxxxxxxx   HP - horizontal period
+//	F00030            W   -----xxx xxxxxxxx   HBB - horizontal blanking begin
+//	F00032            W   -----xxx xxxxxxxx   HBE - horizontal blanking end
+//	F00034            W   -----xxx xxxxxxxx   HSYNC - horizontal sync
+//	F00036            W   ------xx xxxxxxxx   HVS - horizontal vertical sync
+//	F00038            W   -----xxx xxxxxxxx   HDB1 - horizontal display begin 1
+//	F0003A            W   -----xxx xxxxxxxx   HDB2 - horizontal display begin 2
+//	F0003C            W   -----xxx xxxxxxxx   HDE - horizontal display end
+//	F0003E            W   -----xxx xxxxxxxx   VP - vertical period
+//	F00040            W   -----xxx xxxxxxxx   VBB - vertical blanking begin
+//	F00042            W   -----xxx xxxxxxxx   VBE - vertical blanking end
+//	F00044            W   -----xxx xxxxxxxx   VS - vertical sync
+//	F00046            W   -----xxx xxxxxxxx   VDB - vertical display begin
+//	F00048            W   -----xxx xxxxxxxx   VDE - vertical display end
+//	F0004A            W   -----xxx xxxxxxxx   VEB - vertical equalization begin
+//	F0004C            W   -----xxx xxxxxxxx   VEE - vertical equalization end
+//	F0004E            W   -----xxx xxxxxxxx   VI - vertical interrupt
+//	F00050            W   xxxxxxxx xxxxxxxx   PIT0 - programmable interrupt timer 0
+//	F00052            W   xxxxxxxx xxxxxxxx   PIT1 - programmable interrupt timer 1
+//	F00054            W   ------xx xxxxxxxx   HEQ - horizontal equalization end
+//	F00058            W   xxxxxxxx xxxxxxxx   BG - background color
+//	F000E0          R/W   ---xxxxx ---xxxxx   INT1 - CPU interrupt control register
+//	                      ---x---- --------      (C_JERCLR - clear pending Jerry ints)
+//	                      ----x--- --------      (C_PITCLR - clear pending PIT ints)
+//	                      -----x-- --------      (C_OPCLR - clear pending object processor ints)
+//	                      ------x- --------      (C_GPUCLR - clear pending graphics processor ints)
+//	                      -------x --------      (C_VIDCLR - clear pending video timebase ints)
+//	                      -------- ---x----      (C_JERENA - enable Jerry ints)
+//	                      -------- ----x---      (C_PITENA - enable PIT ints)
+//	                      -------- -----x--      (C_OPENA - enable object processor ints)
+//	                      -------- ------x-      (C_GPUENA - enable graphics processor ints)
+//	                      -------- -------x      (C_VIDENA - enable video timebase ints)
+//	F000E2            W   -------- --------   INT2 - CPU interrupt resume register
+//	F00400-F005FF   R/W   xxxxxxxx xxxxxxxx   CLUT - color lookup table A
+//	F00600-F007FF   R/W   xxxxxxxx xxxxxxxx   CLUT - color lookup table B
+//	F00800-F00D9F   R/W   xxxxxxxx xxxxxxxx   LBUF - line buffer A
+//	F01000-F0159F   R/W   xxxxxxxx xxxxxxxx   LBUF - line buffer B
+//	F01800-F01D9F   R/W   xxxxxxxx xxxxxxxx   LBUF - line buffer currently selected
+//	------------------------------------------------------------
+//	F02000-F021FF   R/W   xxxxxxxx xxxxxxxx   GPU control registers
+//	F02100          R/W   xxxxxxxx xxxxxxxx   G_FLAGS - GPU flags register
+//	                R/W   x------- --------      (DMAEN - DMA enable)
+//	                R/W   -x------ --------      (REGPAGE - register page)
+//	                  W   --x----- --------      (G_BLITCLR - clear blitter interrupt)
+//	                  W   ---x---- --------      (G_OPCLR - clear object processor int)
+//	                  W   ----x--- --------      (G_PITCLR - clear PIT interrupt)
+//	                  W   -----x-- --------      (G_JERCLR - clear Jerry interrupt)
+//	                  W   ------x- --------      (G_CPUCLR - clear CPU interrupt)
+//	                R/W   -------x --------      (G_BLITENA - enable blitter interrupt)
+//	                R/W   -------- x-------      (G_OPENA - enable object processor int)
+//	                R/W   -------- -x------      (G_PITENA - enable PIT interrupt)
+//	                R/W   -------- --x-----      (G_JERENA - enable Jerry interrupt)
+//	                R/W   -------- ---x----      (G_CPUENA - enable CPU interrupt)
+//	                R/W   -------- ----x---      (IMASK - interrupt mask)
+//	                R/W   -------- -----x--      (NEGA_FLAG - ALU negative)
+//	                R/W   -------- ------x-      (CARRY_FLAG - ALU carry)
+//	                R/W   -------- -------x      (ZERO_FLAG - ALU zero)
+//	F02104            W   -------- ----xxxx   G_MTXC - matrix control register
+//	                  W   -------- ----x---      (MATCOL - column/row major)
+//	                  W   -------- -----xxx      (MATRIX3-15 - matrix width)
+//	F02108            W   ----xxxx xxxxxx--   G_MTXA - matrix address register
+//	F0210C            W   -------- -----xxx   G_END - data organization register
+//	                  W   -------- -----x--      (BIG_INST - big endian instruction fetch)
+//	                  W   -------- ------x-      (BIG_PIX - big endian pixels)
+//	                  W   -------- -------x      (BIG_IO - big endian I/O)
+//	F02110          R/W   xxxxxxxx xxxxxxxx   G_PC - GPU program counter
+//	F02114          R/W   xxxxxxxx xx-xxxxx   G_CTRL - GPU control/status register
+//	                R     xxxx---- --------      (VERSION - GPU version code)
+//	                R/W   ----x--- --------      (BUS_HOG - hog the bus!)
+//	                R/W   -----x-- --------      (G_BLITLAT - blitter interrupt latch)
+//	                R/W   ------x- --------      (G_OPLAT - object processor int latch)
+//	                R/W   -------x --------      (G_PITLAT - PIT interrupt latch)
+//	                R/W   -------- x-------      (G_JERLAT - Jerry interrupt latch)
+//	                R/W   -------- -x------      (G_CPULAT - CPU interrupt latch)
+//	                R/W   -------- ---x----      (SINGLE_GO - single step one instruction)
+//	                R/W   -------- ----x---      (SINGLE_STEP - single step mode)
+//	                R/W   -------- -----x--      (FORCEINT0 - cause interrupt 0 on GPU)
+//	                R/W   -------- ------x-      (CPUINT - send GPU interrupt to CPU)
+//	                R/W   -------- -------x      (GPUGO - enable GPU execution)
+//	F02118-F0211B   R/W   xxxxxxxx xxxxxxxx   G_HIDATA - high data register
+//	F0211C-F0211F   R     xxxxxxxx xxxxxxxx   G_REMAIN - divide unit remainder
+//	F0211C            W   -------- -------x   G_DIVCTRL - divide unit control
+//	                  W   -------- -------x      (DIV_OFFSET - 1=16.16 divide, 0=32-bit divide)
+//	------------------------------------------------------------
+//	BLITTER REGISTERS
+//	------------------------------------------------------------
+//	F02200-F022FF   R/W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   Blitter registers
+//	F02200            W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   A1_BASE - A1 base register
+//	F02204            W   -------- ---xxxxx -xxxxxxx xxxxx-xx   A1_FLAGS - A1 flags register
+//	                  W   -------- ---x---- -------- --------      (YSIGNSUB - invert sign of Y delta)
+//	                  W   -------- ----x--- -------- --------      (XSIGNSUB - invert sign of X delta)
+//	                  W   -------- -----x-- -------- --------      (Y add control)
+//	                  W   -------- ------xx -------- --------      (X add control)
+//	                  W   -------- -------- -xxxxxx- --------      (width in 6-bit floating point)
+//	                  W   -------- -------- -------x xx------      (ZOFFS1-6 - Z data offset)
+//	                  W   -------- -------- -------- --xxx---      (PIXEL - pixel size)
+//	                  W   -------- -------- -------- ------xx      (PITCH1-4 - data phrase pitch)
+//	F02208            W   -xxxxxxx xxxxxxxx -xxxxxxx xxxxxxxx   A1_CLIP - A1 clipping size
+//	                  W   -xxxxxxx xxxxxxxx -------- --------      (height)
+//	                  W   -------- -------- -xxxxxxx xxxxxxxx      (width)
+//	F0220C          R/W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   A1_PIXEL - A1 pixel pointer
+//	                R/W   xxxxxxxx xxxxxxxx -------- --------      (Y pixel value)
+//	                R/W   -------- -------- xxxxxxxx xxxxxxxx      (X pixel value)
+//	F02210            W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   A1_STEP - A1 step value
+//	                  W   xxxxxxxx xxxxxxxx -------- --------      (Y step value)
+//	                  W   -------- -------- xxxxxxxx xxxxxxxx      (X step value)
+//	F02214            W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   A1_FSTEP - A1 step fraction value
+//	                  W   xxxxxxxx xxxxxxxx -------- --------      (Y step fraction value)
+//	                  W   -------- -------- xxxxxxxx xxxxxxxx      (X step fraction value)
+//	F02218          R/W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   A1_FPIXEL - A1 pixel pointer fraction
+//	                R/W   xxxxxxxx xxxxxxxx -------- --------      (Y pixel fraction value)
+//	                R/W   -------- -------- xxxxxxxx xxxxxxxx      (X pixel fraction value)
+//	F0221C            W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   A1_INC - A1 increment
+//	                  W   xxxxxxxx xxxxxxxx -------- --------      (Y increment)
+//	                  W   -------- -------- xxxxxxxx xxxxxxxx      (X increment)
+//	F02220            W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   A1_FINC - A1 increment fraction
+//	                  W   xxxxxxxx xxxxxxxx -------- --------      (Y increment fraction)
+//	                  W   -------- -------- xxxxxxxx xxxxxxxx      (X increment fraction)
+//	F02224            W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   A2_BASE - A2 base register
+//	F02228            W   -------- ---xxxxx -xxxxxxx xxxxx-xx   A2_FLAGS - A2 flags register
+//	                  W   -------- ---x---- -------- --------      (YSIGNSUB - invert sign of Y delta)
+//	                  W   -------- ----x--- -------- --------      (XSIGNSUB - invert sign of X delta)
+//	                  W   -------- -----x-- -------- --------      (Y add control)
+//	                  W   -------- ------xx -------- --------      (X add control)
+//	                  W   -------- -------- -xxxxxx- --------      (width in 6-bit floating point)
+//	                  W   -------- -------- -------x xx------      (ZOFFS1-6 - Z data offset)
+//	                  W   -------- -------- -------- --xxx---      (PIXEL - pixel size)
+//	                  W   -------- -------- -------- ------xx      (PITCH1-4 - data phrase pitch)
+//	F0222C            W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   A2_MASK - A2 window mask
+//	F02230          R/W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   A2_PIXEL - A2 pixel pointer
+//	                R/W   xxxxxxxx xxxxxxxx -------- --------      (Y pixel value)
+//	                R/W   -------- -------- xxxxxxxx xxxxxxxx      (X pixel value)
+//	F02234            W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   A2_STEP - A2 step value
+//	                  W   xxxxxxxx xxxxxxxx -------- --------      (Y step value)
+//	                  W   -------- -------- xxxxxxxx xxxxxxxx      (X step value)
+//	F02238            W   -xxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   B_CMD - command register
+//	                  W   -x------ -------- -------- --------      (SRCSHADE - modify source intensity)
+//	                  W   --x----- -------- -------- --------      (BUSHI - hi priority bus)
+//	                  W   ---x---- -------- -------- --------      (BKGWREN - writeback destination)
+//	                  W   ----x--- -------- -------- --------      (DCOMPEN - write inhibit from data comparator)
+//	                  W   -----x-- -------- -------- --------      (BCOMPEN - write inhibit from bit coparator)
+//	                  W   ------x- -------- -------- --------      (CMPDST - compare dest instead of src)
+//	                  W   -------x xxx----- -------- --------      (logical operation)
+//	                  W   -------- ---xxx-- -------- --------      (ZMODE - Z comparator mode)
+//	                  W   -------- ------x- -------- --------      (ADDDSEL - select sum of src & dst)
+//	                  W   -------- -------x -------- --------      (PATDSEL - select pattern data)
+//	                  W   -------- -------- x------- --------      (TOPNEN - enable carry into top intensity nibble)
+//	                  W   -------- -------- -x------ --------      (TOPBEN - enable carry into top intensity byte)
+//	                  W   -------- -------- --x----- --------      (ZBUFF - enable Z updates in inner loop)
+//	                  W   -------- -------- ---x---- --------      (GOURD - enable gouraud shading in inner loop)
+//	                  W   -------- -------- ----x--- --------      (DSTA2 - reverses A2/A1 roles)
+//	                  W   -------- -------- -----x-- --------      (UPDA2 - add A2 step to A2 in outer loop)
+//	                  W   -------- -------- ------x- --------      (UPDA1 - add A1 step to A1 in outer loop)
+//	                  W   -------- -------- -------x --------      (UPDA1F - add A1 fraction step to A1 in outer loop)
+//	                  W   -------- -------- -------- x-------      (diagnostic use)
+//	                  W   -------- -------- -------- -x------      (CLIP_A1 - clip A1 to window)
+//	                  W   -------- -------- -------- --x-----      (DSTWRZ - enable dest Z write in inner loop)
+//	                  W   -------- -------- -------- ---x----      (DSTENZ - enable dest Z read in inner loop)
+//	                  W   -------- -------- -------- ----x---      (DSTEN - enables dest data read in inner loop)
+//	                  W   -------- -------- -------- -----x--      (SRCENX - enable extra src read at start of inner)
+//	                  W   -------- -------- -------- ------x-      (SRCENZ - enables source Z read in inner loop)
+//	                  W   -------- -------- -------- -------x      (SRCEN - enables source data read in inner loop)
+//	F02238          R     xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   B_CMD - status register
+//	                R     xxxxxxxx xxxxxxxx -------- --------      (inner count)
+//	                R     -------- -------- xxxxxxxx xxxxxx--      (diagnostics)
+//	                R     -------- -------- -------- ------x-      (STOPPED - when stopped in collision detect)
+//	                R     -------- -------- -------- -------x      (IDLE - when idle)
+//	F0223C            W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   B_COUNT - counters register
+//	                  W   xxxxxxxx xxxxxxxx -------- --------      (outer loop count)
+//	                  W   -------- -------- xxxxxxxx xxxxxxxx      (inner loop count)
+//	F02240-F02247     W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   B_SRCD - source data register
+//	F02248-F0224F     W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   B_DSTD - destination data register
+//	F02250-F02257     W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   B_DSTZ - destination Z register
+//	F02258-F0225F     W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   B_SRCZ1 - source Z register 1
+//	F02260-F02267     W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   B_SRCZ2 - source Z register 2
+//	F02268-F0226F     W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   B_PATD - pattern data register
+//	F02270            W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   B_IINC - intensity increment
+//	F02274            W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   B_ZINC - Z increment
+//	F02278            W   -------- -------- -------- -----xxx   B_STOP - collision control
+//	                  W   -------- -------- -------- -----x--      (STOPEN - enable blitter collision stops)
+//	                  W   -------- -------- -------- ------x-      (ABORT - abort after stop)
+//	                  W   -------- -------- -------- -------x      (RESUME - resume after stop)
+//	F0227C            W   -------- xxxxxxxx xxxxxxxx xxxxxxxx   B_I3 - intensity 3
+//	F02280            W   -------- xxxxxxxx xxxxxxxx xxxxxxxx   B_I2 - intensity 2
+//	F02284            W   -------- xxxxxxxx xxxxxxxx xxxxxxxx   B_I1 - intensity 1
+//	F02288            W   -------- xxxxxxxx xxxxxxxx xxxxxxxx   B_I0 - intensity 0
+//	F0228C            W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   B_Z3 - Z3
+//	F02290            W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   B_Z2 - Z2
+//	F02294            W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   B_Z1 - Z1
+//	F02298            W   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx   B_Z0 - Z0
+//	------------------------------------------------------------
+
+#include "tom.h"
+#include "tom_scan_simd_neon.h"
+#include "tom_scan_simd_sse2.h"
+
+#include <string.h>								// For memset()
+#include "blitter.h"
+#include "bus_arbiter.h"
+#include "event.h"
+#include "gpu.h"
+#include "inputdev.h"
+#include "jaguar.h"
+#include "jerry.h"
+#include "shadowfb.h"
+#include "log.h"
+#include "perf_iface.h"
+#include "m68000/m68kinterface.h"
+#include "op.h"
+#include "perf_counters.h"
+#include "settings.h"
+#include "../core/vjtrace.h"
+
+PERF_COUNTER(timing_gpu_irqs_to_68k);
+PERF_COUNTER(timing_int1_video);
+PERF_COUNTER(timing_int1_gpu);
+PERF_COUNTER(timing_int1_object);
+PERF_COUNTER(timing_int1_timer);
+PERF_COUNTER(timing_int1_jerry);
+
+// Red Color Values for CrY<->RGB Color Conversion
+uint8_t redcv[16][16] = {
+   //  0   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
+   // ----------------------------------------------------------------------
+	{  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0},    // 0
+	{  34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 19, 0},    // 1
+	{  68, 68, 68, 68, 68, 68, 68, 68, 68, 68, 68, 68, 64, 43, 21, 0},    // 2
+	{  102,102,102,102,102,102,102,102,102,102,102,95, 71, 47, 23, 0},    // 3
+	{  135,135,135,135,135,135,135,135,135,135,130,104,78, 52, 26, 0},    // 4
+	{  169,169,169,169,169,169,169,169,169,170,141,113,85, 56, 28, 0},    // 5
+	{  203,203,203,203,203,203,203,203,203,183,153,122,91, 61, 30, 0},    // 6
+	{  237,237,237,237,237,237,237,237,230,197,164,131,98, 65, 32, 0},    // 7
+	{  255,255,255,255,255,255,255,255,247,214,181,148,15, 82, 49, 7},    // 8
+	{  255,255,255,255,255,255,255,255,255,235,204,173,143,112,81, 51},   // 9
+	{  255,255,255,255,255,255,255,255,255,255,227,198,170,141,113,85},   // A
+	{  255,255,255,255,255,255,255,255,255,255,249,223,197,171,145,119},  // B
+	{  255,255,255,255,255,255,255,255,255,255,255,248,224,200,177,153},  // C
+	{  255,255,255,255,255,255,255,255,255,255,255,255,252,230,208,187},  // D
+	{  255,255,255,255,255,255,255,255,255,255,255,255,255,255,240,221},  // E
+	{  255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255}   // F
+};
+
+// Green Color Values for CrY<->RGB Color Conversion
+uint8_t greencv[16][16] = {
+   //  0   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
+   // ----------------------------------------------------------------------
+	{  0,  17, 34, 51,68, 85, 102,119,136,153,170,187,204,221,238,255},   // 0
+	{  0,  19, 38, 57,77, 96, 115,134,154,173,192,211,231,250,255,255},   // 1
+	{  0,  21, 43, 64,86, 107,129,150,172,193,215,236,255,255,255,255},   // 2
+	{  0,  23, 47, 71,95, 119,142,166,190,214,238,255,255,255,255,255},   // 3
+	{  0,  26, 52, 78,104,130,156,182,208,234,255,255,255,255,255,255},   // 4
+	{  0,  28, 56, 85,113,141,170,198,226,255,255,255,255,255,255,255},   // 5
+	{  0,  30, 61, 91,122,153,183,214,244,255,255,255,255,255,255,255},   // 6
+	{  0,  32, 65, 98,131,164,197,230,255,255,255,255,255,255,255,255},   // 7
+	{  0,  32, 65, 98,131,164,197,230,255,255,255,255,255,255,255,255},   // 8
+	{  0,  30, 61, 91,122,153,183,214,244,255,255,255,255,255,255,255},   // 9
+	{  0,  28, 56, 85,113,141,170,198,226,255,255,255,255,255,255,255},   // A
+	{  0,  26, 52, 78,104,130,156,182,208,234,255,255,255,255,255,255},   // B
+	{  0,  23, 47, 71,95, 119,142,166,190,214,238,255,255,255,255,255},   // C
+	{  0,  21, 43, 64,86, 107,129,150,172,193,215,236,255,255,255,255},   // D
+	{  0,  19, 38, 57,77, 96, 115,134,154,173,192,211,231,250,255,255},   // E
+	{  0,  17, 34, 51,68, 85, 102,119,136,153,170,187,204,221,238,255}    // F
+};
+
+// Blue Color Values for CrY<->RGB Color Conversion
+uint8_t bluecv[16][16] = {
+   //  0   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
+   // ----------------------------------------------------------------------
+	{  255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255},  // 0
+	{  255,255,255,255,255,255,255,255,255,255,255,255,255,255,240,221},  // 1
+	{  255,255,255,255,255,255,255,255,255,255,255,255,252,230,208,187},  // 2
+	{  255,255,255,255,255,255,255,255,255,255,255,248,224,200,177,153},  // 3
+	{  255,255,255,255,255,255,255,255,255,255,249,223,197,171,145,119},  // 4
+	{  255,255,255,255,255,255,255,255,255,255,227,198,170,141,113,85},   // 5
+	{  255,255,255,255,255,255,255,255,255,235,204,173,143,112,81, 51},   // 6
+	{  255,255,255,255,255,255,255,255,247,214,181,148,115,82, 49, 17},   // 7
+	{  237,237,237,237,237,237,237,237,230,197,164,131,98, 65, 32, 0},    // 8
+	{  203,203,203,203,203,203,203,203,203,183,153,122,91, 61, 30, 0},    // 9
+	{  169,169,169,169,169,169,169,169,169,170,141,113,85, 56, 28, 0},    // A
+	{  135,135,135,135,135,135,135,135,135,135,130,104,78, 52, 26, 0},    // B
+	{  102,102,102,102,102,102,102,102,102,102,102,95, 71, 47, 23, 0},    // C
+	{  68, 68, 68, 68, 68, 68, 68, 68, 68, 68, 68, 68, 64, 43, 21, 0},    // D
+	{  34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 19, 0},    // E
+	{  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0}     // F
+};
+
+#define NEW_TIMER_SYSTEM
+
+// TOM registers (offset from $F00000)
+
+#define MEMCON1		0x00
+#define MEMCON2		0x02
+#define HC			0x04
+#define VC			0x06
+#define LPH			0x08		// Light pen horizontal (latched HC), RO
+#define LPV			0x0A		// Light pen vertical (latched VC, half-lines), RO
+#define OLP			0x20		// Object list pointer
+#define OBF			0x26		// Object processor flag
+#define VMODE		0x28
+#define   MODE		0x0006		// Line buffer to video generator mode
+#define   BGEN		0x0080		// Background enable (CRY & RGB16 only)
+#define   VARMOD	0x0100		// Mixed CRY/RGB16 mode (only works in MODE 0!)
+#define   PWIDTH	0x0E00		// Pixel width in video clock cycles (value written + 1)
+#define BORD1		0x2A		// Border green/red values (8 BPP)
+#define BORD2		0x2C		// Border blue value (8 BPP)
+#define HP			0x2E		// Values range from 1 - 1024 (value written + 1)
+#define HBB			0x30		// Horizontal blank begin
+#define HBE			0x32
+#define HS			0x34		// Horizontal sync
+#define HVS			0x36		// Horizontal vertical sync
+#define HDB1		0x38		// Horizontal display begin 1
+#define HDB2		0x3A
+#define HDE			0x3C
+#define VP			0x3E		// Value ranges from 1 - 2048 (value written + 1)
+#define VBB			0x40		// Vertical blank begin
+#define VBE			0x42
+#define VS			0x44		// Vertical sync
+#define VDB			0x46		// Vertical display begin
+#define VDE			0x48
+#define VEB			0x4A		// Vertical equalization begin
+#define VEE			0x4C		// Vertical equalization end
+#define VI			0x4E		// Vertical interrupt
+#define PIT0		0x50
+#define PIT1		0x52
+#define HEQ			0x54		// Horizontal equalization end
+#define BG			0x58		// Background color
+#define INT1		0xE0
+
+/* Default fallback values used when registers haven't been programmed yet */
+#define DEFAULT_LEFT_VISIBLE_HC			(208 - 16 - (1 * 4))
+#define DEFAULT_RIGHT_VISIBLE_HC		(DEFAULT_LEFT_VISIBLE_HC + (VIRTUAL_SCREEN_WIDTH * 4))
+#define DEFAULT_TOP_VISIBLE_VC			31
+#define DEFAULT_BOTTOM_VISIBLE_VC		511
+
+#define DEFAULT_LEFT_VISIBLE_HC_PAL		(208 - 16 - (-3 * 4))
+#define DEFAULT_RIGHT_VISIBLE_HC_PAL	(DEFAULT_LEFT_VISIBLE_HC_PAL + (VIRTUAL_SCREEN_WIDTH * 4))
+#define DEFAULT_TOP_VISIBLE_VC_PAL		67
+#define DEFAULT_BOTTOM_VISIBLE_VC_PAL	579
+
+/* Mode-aware fallback selectors (DRY the NTSC/PAL ternary) */
+#define FALLBACK_TOP_VC			(vjs.hardwareTypeNTSC ? DEFAULT_TOP_VISIBLE_VC : DEFAULT_TOP_VISIBLE_VC_PAL)
+#define FALLBACK_BOTTOM_VC		(vjs.hardwareTypeNTSC ? DEFAULT_BOTTOM_VISIBLE_VC : DEFAULT_BOTTOM_VISIBLE_VC_PAL)
+#define FALLBACK_LEFT_HC		(vjs.hardwareTypeNTSC ? DEFAULT_LEFT_VISIBLE_HC : DEFAULT_LEFT_VISIBLE_HC_PAL)
+#define FALLBACK_RIGHT_HC		(vjs.hardwareTypeNTSC ? DEFAULT_RIGHT_VISIBLE_HC : DEFAULT_RIGHT_VISIBLE_HC_PAL)
+
+/* Maximum framebuffer extents (safety clamp) */
+#define MAX_VISIBLE_HEIGHT		512
+
+uint8_t tomRam8[0x4000];
+uint32_t tomWidth, tomHeight;
+uint32_t tomTimerPrescaler;
+uint32_t tomTimerDivider;
+int32_t tomTimerCounter;
+static uint16_t tomHCReadPhase;
+
+/* Rows TOMExecHalfline actually wrote, tracked live so a mid-frame VDB/VDE
+ * change cannot make the count disagree with what was drawn.  `Cur`
+ * accumulates the frame in progress; `Prev` and `Last` are latched at the
+ * halfline wrap.
+ *
+ * `Last` is the max of the two most recent frames rather than just the last
+ * one, for interlace: each field writes only every other row, so a single
+ * frame's maximum alternates by one and blanking on it alone would erase and
+ * rewrite the bottom row of the opposite field every frame.  Taking the max
+ * also adds a frame of hysteresis when the window shrinks, which errs towards
+ * blanking less -- the safe direction, since blanking too much is the failure
+ * mode that matters. */
+static uint32_t tomRowsWrittenCur;
+static uint32_t tomRowsWrittenPrev;
+static uint32_t tomRowsWrittenLast;
+uint16_t tom_jerry_int_pending, tom_timer_int_pending, tom_object_int_pending,
+         tom_gpu_int_pending, tom_video_int_pending;
+
+// These are set by the "user" of the Jaguar core lib, since these are
+// OS/system dependent.
+uint32_t * screenBuffer;
+uint32_t screenPitch;
+
+/* RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE presentation-skip -- see the
+ * declaration in tom.h for the safety argument.  Default 0 (render). */
+int tomSkipVideoPresent;
+
+typedef void (render_xxx_scanline_fn)(uint32_t *);
+
+// Private function prototypes
+
+void tom_render_16bpp_cry_scanline(uint32_t * backbuffer);
+void tom_render_24bpp_scanline(uint32_t * VJ_RESTRICT backbuffer);
+void tom_render_16bpp_direct_scanline(uint32_t * VJ_RESTRICT backbuffer);
+void tom_render_16bpp_rgb_scanline(uint32_t * VJ_RESTRICT backbuffer);
+void tom_render_16bpp_cry_rgb_mix_scanline(uint32_t * backbuffer);
+uint16_t TOMIRQControlReg(void);
+
+render_xxx_scanline_fn * scanline_render[] =
+{
+   tom_render_16bpp_cry_scanline,
+   tom_render_24bpp_scanline,
+   tom_render_16bpp_direct_scanline,
+   tom_render_16bpp_rgb_scanline,
+   tom_render_16bpp_cry_rgb_mix_scanline,
+   tom_render_24bpp_scanline,
+   tom_render_16bpp_direct_scanline,
+   tom_render_16bpp_rgb_scanline
+};
+
+uint32_t RGB16ToRGB32[0x10000];
+uint32_t CRY16ToRGB32[0x10000];
+uint32_t MIX16ToRGB32[0x10000];
+
+/*
+ * Derive visible-window boundaries from TOM display registers (VDB, VDE,
+ * HDB1, HDE) instead of using hardcoded constants.  Falls back to the
+ * mode-specific legacy defaults when registers are zero or still hold the
+ * shared reset values (VDB=38, VDE=518, HDB1=203, HDE=1665).
+ */
+
+/* Vertical visible window: derived from VDB/VDE.
+ * Returns the first visible halfline (topVisible) via the function,
+ * or the last visible halfline (bottomVisible) via the companion below. */
+static uint16_t TOMGetTopVisible(void)
+{
+	uint16_t vdb = GET16(tomRam8, VDB);
+	uint16_t vp = GET16(tomRam8, VP);
+
+	/* If VDB is zero or matches the shared reset default (38), use the
+	 * mode-specific fallback so PAL gets its distinct visible window. */
+	if (vdb == 0 || vdb == 38)
+		return FALLBACK_TOP_VC;
+
+	/* Guard against garbage VDB values exceeding VP (total halflines).
+	 * Treat VP==0 as uninitialized — fall back rather than skipping the
+	 * range check entirely. */
+	if (vp == 0 || vdb > vp)
+		return FALLBACK_TOP_VC;
+
+	return vdb;
+}
+
+static uint16_t TOMGetBottomVisible(void)
+{
+	uint16_t vdb = GET16(tomRam8, VDB);
+	uint16_t vde = GET16(tomRam8, VDE);
+	uint16_t vp = GET16(tomRam8, VP);
+	uint16_t result;
+	uint16_t top;
+	uint16_t max_bottom;
+
+	/* Use mode-specific fallback only when BOTH VDB and VDE are at their
+	 * shared reset defaults.  If only one has been reprogrammed, derive
+	 * from the register to avoid window collapse. */
+	if (vde == 0)
+		return FALLBACK_BOTTOM_VC;
+	if (vde == 518 && vdb == 38)
+		return FALLBACK_BOTTOM_VC;
+
+	/* Guard against garbage VDE exceeding VP.  Treat VP==0 as
+	 * uninitialized — fall back rather than skipping the check. */
+	if (vp == 0 || vde > vp)
+		return FALLBACK_BOTTOM_VC;
+
+	result = vde;
+
+	/* Clamp so that (bottom - top) / 2 never exceeds MAX_VISIBLE_HEIGHT. */
+	top = TOMGetTopVisible();
+	max_bottom = top + (MAX_VISIBLE_HEIGHT * 2);
+	if (result > max_bottom)
+		result = max_bottom;
+
+	/* Guard: if result <= top (e.g. VDB reprogrammed above VDE), use
+	 * fallback to avoid a collapsed/inverted window. */
+	if (result <= top)
+		return FALLBACK_BOTTOM_VC;
+
+	return result;
+}
+
+/* Horizontal visible window: left edge.
+ *
+ * Always return the mode-specific fallback constant.  The left edge defines
+ * the fixed coordinate origin for HDB1-relative pixel positioning in the
+ * scanline renderers (startPos = HDB1 - leftHC).  Deriving leftHC from HDB1
+ * itself collapses startPos to a constant and shifts games that program HDB1
+ * to non-default values (e.g. Battle Sphere).  The original emulator always
+ * used a fixed left edge; preserve that behaviour. */
+static uint32_t TOMGetLeftVisibleHC(void)
+{
+	return FALLBACK_LEFT_HC;
+}
+
+static uint32_t TOMGetRightVisibleHC(void)
+{
+	uint16_t hde = GET16(tomRam8, HDE);
+	uint32_t left = TOMGetLeftVisibleHC();
+	uint32_t max_right = left + (uint32_t)VIRTUAL_SCREEN_WIDTH * 4;
+
+	/* If HDE is zero or not usefully beyond the left edge, return
+	 * the max right (== FALLBACK_RIGHT_HC since left is fixed). */
+	if (hde == 0 || (uint32_t)hde <= left)
+		return max_right;
+
+	/* Right edge is the lesser of HDE and max_right.  This respects
+	 * games that program a narrower HDE while preventing overflow. */
+	if ((uint32_t)hde < max_right)
+		return (uint32_t)hde;
+	return max_right;
+}
+
+static void TOMAssertEnabledIRQs(void)
+{
+   uint16_t pending = (tom_jerry_int_pending << IRQ_DSP)
+      | (tom_timer_int_pending << IRQ_TIMER)
+      | (tom_object_int_pending << IRQ_OPFLAG)
+      | (tom_gpu_int_pending << IRQ_GPU)
+      | (tom_video_int_pending << IRQ_VIDEO);
+
+   if (pending & tomRam8[INT1 + 1])
+      m68k_set_irq(2);
+}
+
+
+/* True while TOM is still driving the 68K's level-2 request, i.e. an
+ * enabled INT1 source has an uncleared pending latch (JTRM: the pending
+ * bits are only cleared by writing 1 to the matching C_*CLR bit in the
+ * high byte of INT1).  JERRY reaches the 68K through TOM's bit 4, so its
+ * own latch counts when C_JERENA is set.
+ *
+ * m68k_execute() consults this before re-presenting a request that had to
+ * wait for the CPU's interrupt mask to drop (#187): a game that polls and
+ * clears INT1 itself -- Pitfall runs at mask 1-2 and does exactly that --
+ * must not be handed an interrupt whose source it already serviced. */
+static uint8_t TOMPendingMask(void)
+{
+   uint8_t pending = (uint8_t)((tom_timer_int_pending << IRQ_TIMER)
+      | (tom_object_int_pending << IRQ_OPFLAG)
+      | (tom_gpu_int_pending << IRQ_GPU)
+      | (tom_video_int_pending << IRQ_VIDEO));
+
+   if (tom_jerry_int_pending || JERRYIRQRequestActive())
+      pending |= (uint8_t)(1 << IRQ_DSP);
+
+   return pending;
+}
+
+
+int TOMIRQRequestActive(void)
+{
+   return (TOMPendingMask() & tomRam8[INT1 + 1]) ? 1 : 0;
+}
+
+static void TOMClearPendingIRQs(uint8_t clear)
+{
+   if (clear & 0x01)
+      tom_video_int_pending = 0;
+   if (clear & 0x02)
+      tom_gpu_int_pending = 0;
+   if (clear & 0x04)
+      tom_object_int_pending = 0;
+   if (clear & 0x08)
+      tom_timer_int_pending = 0;
+   if (clear & 0x10)
+      tom_jerry_int_pending = 0;
+}
+
+//#warning "This is not endian-safe. !!! FIX !!!"
+void TOMFillLookupTables(void)
+{
+   // NOTE: Jaguar 16-bit (non-CRY) color is RBG 556 like so:
+   //       RRRR RBBB BBGG GGGG
+
+   unsigned i;
+   for(i=0; i<0x10000; i++)
+      RGB16ToRGB32[i] = 0xFF000000
+         | ((i & 0xF800) << 8)					// Red
+         | ((i & 0x003F) << 10)					// Green
+         | ((i & 0x07C0) >> 3);					// Blue
+
+   for(i=0; i<0x10000; i++)
+   {
+      uint32_t cyan = (i & 0xF000) >> 12,
+               red = (i & 0x0F00) >> 8,
+               intensity = (i & 0x00FF);
+
+      uint32_t r = (((uint32_t)redcv[cyan][red]) * intensity) >> 8,
+               g = (((uint32_t)greencv[cyan][red]) * intensity) >> 8,
+               b = (((uint32_t)bluecv[cyan][red]) * intensity) >> 8;
+
+      CRY16ToRGB32[i] = 0xFF000000 | (r << 16) | (g << 8) | (b << 0);
+      MIX16ToRGB32[i] = ((i & 0x01) ? RGB16ToRGB32[i] : CRY16ToRGB32[i]);
+   }
+}
+
+
+void TOMSetPendingJERRYInt(void)
+{
+   PERF_INC(timing_int1_jerry);
+   tom_jerry_int_pending = 1;
+   VJT_EMIT(VJT_EV_IRQ_ASSERT, TOM, 4, 0);
+   TOMAssertEnabledIRQs();
+}
+
+
+void TOMSetPendingTimerInt(void)
+{
+   PERF_INC(timing_int1_timer);
+   tom_timer_int_pending = 1;
+   VJT_EMIT(VJT_EV_IRQ_ASSERT, TOM, 3, 0);
+   TOMAssertEnabledIRQs();
+}
+
+
+void TOMSetPendingObjectInt(void)
+{
+   PERF_INC(timing_int1_object);
+   tom_object_int_pending = 1;
+   VJT_EMIT(VJT_EV_IRQ_ASSERT, TOM, 2, 0);
+   TOMAssertEnabledIRQs();
+}
+
+
+void TOMSetPendingGPUInt(void)
+{
+   PERF_INC(timing_int1_gpu);
+   tom_gpu_int_pending = 1;
+   VJT_EMIT(VJT_EV_IRQ_ASSERT, TOM, 1, 0);
+   TOMAssertEnabledIRQs();
+}
+
+
+void TOMSetPendingVideoInt(void)
+{
+   PERF_INC(timing_int1_video);
+   tom_video_int_pending = 1;
+   VJT_EMIT(VJT_EV_IRQ_ASSERT, TOM, 0, 0);
+   TOMAssertEnabledIRQs();
+}
+
+
+uint8_t * TOMGetRamPointer(void)
+{
+   return tomRam8;
+}
+
+
+uint8_t TOMGetVideoMode(void)
+{
+   uint16_t vmode = GET16(tomRam8, VMODE);
+   return ((vmode & VARMOD) >> 6) | ((vmode & MODE) >> 1);
+}
+
+uint16_t TOMGetVDB(void)
+{
+   return GET16(tomRam8, VDB);
+}
+
+uint16_t TOMGetHC(void)
+{
+   return GET16(tomRam8, HC);
+}
+
+
+uint16_t TOMGetVP(void)
+{
+   return GET16(tomRam8, VP);
+}
+
+uint16_t TOMGetVI(void)
+{
+   return GET16(tomRam8, VI);
+}
+
+uint16_t TOMGetMEMCON1(void)
+{
+   return GET16(tomRam8, MEMCON1);
+}
+
+uint16_t TOMGetMEMCON2(void)
+{
+   return GET16(tomRam8, MEMCON2);
+}
+
+#define LEFT_BG_FIX
+
+/* Clamp `width` so the per-pixel loop in a tom_render_*_scanline()
+ * cannot walk past the end of tomRam8 via current_line_buffer.
+ * Catches an ASAN-reported OOB read (#127): when display registers
+ * request a width larger than the on-chip line buffer holds
+ * (10240 bytes at tomRam8[0x1800..0x3FFF]).
+ *
+ *   bytes_per_iter: source bytes consumed per loop iter (2 for 16bpp
+ *                   variants, 4 for 24bpp).
+ *   pwidth_scale:   backbuffer pixels produced per loop iter. */
+static uint16_t tom_clamp_line_buffer_width(
+   const uint8_t *current_line_buffer, uint16_t width,
+   unsigned bytes_per_iter, uint8_t pwidth_scale)
+{
+   const uint8_t *lb_end = &tomRam8[sizeof(tomRam8)];
+   unsigned long bytes_left;
+   unsigned long safe_width;
+   if (current_line_buffer >= lb_end) return 0;
+   bytes_left = (unsigned long)(lb_end - current_line_buffer);
+   safe_width = (bytes_left / bytes_per_iter) * pwidth_scale;
+   return (width > safe_width) ? (uint16_t)safe_width : width;
+}
+
+/* Texture-pack substitution for ONE presented pixel on a non-CRY
+ * scanline path (issue #528).
+ *
+ * This is the single seam the RGB16-direct renderers -- 1x and Nx --
+ * use, so both paths present a pack identically and a resolution change
+ * can never make a pack look different for a reason unrelated to
+ * resolution.  It is also exactly what the test gate drives, the same
+ * way gates 4 and 7 drive ShadowFBLineFromRAM / ShadowHiresLineFromRAM.
+ *
+ * A hit requires SHADOWFB_TAG_REPL, i.e. the entry is absolute RGB888
+ * the pack author drew.  A true-color CRY reconstruction deliberately
+ * does NOT hit here: it is a decomposition of the 16-bit word through
+ * the chroma tables and means nothing for a word TOM is scanning out as
+ * RGB16 (see the SHADOWFB_TAG_REPL comment in shadowfb.h).
+ *
+ * Returns nonzero and fills *out (with alpha) on a hit. */
+int TomLinePackRGB(int idx, uint16_t color, uint32_t *out)
+{
+   if (!shadowFBActive || !shadowFBReplActive)
+      return 0;
+   if (idx < 0 || idx >= SHADOWFB_LINE_PIXELS)
+      return 0;
+   if (shadowLineTag[idx] != ((uint32_t)color | SHADOWFB_TAG_VALID
+                              | SHADOWFB_TAG_REPL))
+      return 0;
+   *out = 0xFF000000 | shadowLineRGB[idx];
+   return 1;
+}
+
+// 16 BPP CRY/RGB mixed mode rendering
+void tom_render_16bpp_cry_rgb_mix_scanline(uint32_t * backbuffer)
+{
+   unsigned i;
+   uint8_t s;
+   uint16_t width = tomWidth;
+   uint8_t * current_line_buffer = (uint8_t *)&tomRam8[0x1800];
+   uint8_t pwidth = ((GET16(tomRam8, VMODE) & PWIDTH) >> 9) + 1;
+   uint8_t pwidth_scale = (pwidth >= 8) ? (pwidth / 4) : 1;
+   int16_t startPos = GET16(tomRam8, HDB1) - (int16_t)TOMGetLeftVisibleHC();
+   uint16_t startPos_disp;
+   startPos /= pwidth;
+
+   if (startPos < 0)
+      current_line_buffer += 2 * -startPos;
+   else
+#ifdef LEFT_BG_FIX
+   {
+      uint8_t g = tomRam8[BORD1], r = tomRam8[BORD1 + 1], b = tomRam8[BORD2 + 1];
+      uint32_t pixel = 0xFF000000 | (r << 16) | (g << 8) | (b << 0);
+      startPos_disp = (uint16_t)startPos * pwidth_scale;
+      /* The border fill is part of the row, never longer than it: a left
+       * edge (HDB1) past the row width would otherwise wrap `width -= ...`
+       * below to ~65k and run the pixel loop off the end of the row. */
+      if (startPos_disp > width)
+         startPos_disp = width;
+
+      for(i = 0; i < startPos_disp; i++)
+         *backbuffer++ = pixel;
+
+      width -= startPos_disp;
+   }
+#else
+   backbuffer += 2 * startPos, width -= startPos;
+#endif
+
+   width = tom_clamp_line_buffer_width(current_line_buffer, width, 2, pwidth_scale);
+   while (width >= pwidth_scale)
+   {
+      uint16_t color = (*current_line_buffer++) << 8;
+      color |= *current_line_buffer++;
+      for (s = 0; s < pwidth_scale; s++)
+         *backbuffer++ = MIX16ToRGB32[color];
+      width -= pwidth_scale;
+   }
+}
+
+// 16 BPP CRY mode rendering
+void tom_render_16bpp_cry_scanline(uint32_t * backbuffer)
+{
+   unsigned i;
+   uint8_t s;
+   uint16_t width = tomWidth;
+   uint8_t * current_line_buffer = (uint8_t *)&tomRam8[0x1800];
+   uint8_t pwidth = ((GET16(tomRam8, VMODE) & PWIDTH) >> 9) + 1;
+   uint8_t pwidth_scale = (pwidth >= 8) ? (pwidth / 4) : 1;
+   int16_t startPos = GET16(tomRam8, HDB1) - (int16_t)TOMGetLeftVisibleHC();
+   uint16_t startPos_disp;
+   startPos /= pwidth;
+
+   if (startPos < 0)
+      current_line_buffer += 2 * -startPos;
+   else
+#ifdef LEFT_BG_FIX
+   {
+      uint8_t g = tomRam8[BORD1], r = tomRam8[BORD1 + 1], b = tomRam8[BORD2 + 1];
+      uint32_t pixel = 0xFF000000 | (r << 16) | (g << 8) | (b << 0);
+      startPos_disp = (uint16_t)startPos * pwidth_scale;
+      /* The border fill is part of the row, never longer than it: a left
+       * edge (HDB1) past the row width would otherwise wrap `width -= ...`
+       * below to ~65k and run the pixel loop off the end of the row. */
+      if (startPos_disp > width)
+         startPos_disp = width;
+
+      for(i = 0; i < startPos_disp; i++)
+         *backbuffer++ = pixel;
+
+      width -= startPos_disp;
+   }
+#else
+   backbuffer += 2 * startPos, width -= startPos;
+#endif
+
+   width = tom_clamp_line_buffer_width(current_line_buffer, width, 2, pwidth_scale);
+
+   /* True-color path (see shadowfb.h): substitute the full-precision
+    * RGB888 from the shadow line buffer, but only when the entry's tag
+    * matches the 16-bit value actually in the line buffer -- any other
+    * write path (direct TOM writes, RMW blends, missed sites) then
+    * falls back to the stock LUT.  With the option off this block is
+    * never entered and output is bit-identical to stock. */
+   if (shadowFBActive)
+   {
+      int sfbIdx = (int)((current_line_buffer - &tomRam8[0x1800]) >> 1);
+      while (width >= pwidth_scale)
+      {
+         uint32_t out;
+         uint16_t color = (*current_line_buffer++) << 8;
+         color |= *current_line_buffer++;
+         out = CRY16ToRGB32[color];
+         /* SHADOWFB_TAG_REPL is masked out: on the CRY path BOTH kinds
+          * of entry (true-color reconstruction and pack art) present. */
+         if (sfbIdx >= 0 && sfbIdx < SHADOWFB_LINE_PIXELS
+               && (shadowLineTag[sfbIdx] & SHADOWFB_TAG_VMASK)
+                  == ((uint32_t)color | SHADOWFB_TAG_VALID))
+            out = 0xFF000000 | shadowLineRGB[sfbIdx];
+         sfbIdx++;
+         for (s = 0; s < pwidth_scale; s++)
+            *backbuffer++ = out;
+         width -= pwidth_scale;
+      }
+      return;
+   }
+
+   while (width >= pwidth_scale)
+   {
+      uint16_t color = (*current_line_buffer++) << 8;
+      color |= *current_line_buffer++;
+      for (s = 0; s < pwidth_scale; s++)
+         *backbuffer++ = CRY16ToRGB32[color];
+      width -= pwidth_scale;
+   }
+}
+
+/* Hi-res (Nx) CRY renderer -- epic #338 track 1, Stage 1.
+ *
+ * Mirrors tom_render_16bpp_cry_scanline exactly, but produces N sub-rows
+ * (screenPitch apart) of N-wide pixels per stock pixel, consuming the Nx
+ * shadow line buffer that ShadowHiresLineFromRAM populated during the
+ * OP's single per-scanline pass.
+ *
+ * Stage 2 output contract: blocks written by non-qualifying blit shapes
+ * still carry box replication (Stage 1 semantics), so their output is
+ * bit-exactly the NxN box replication of the stock pixel.  Blocks
+ * written by qualifying fractional-source-walk blits carry real
+ * per-subpixel content, and the box-replication property no longer
+ * holds there BY DESIGN -- that is the feature.  On a tag miss (stale
+ * entry, unshadowed page, foreign line-buffer writer) every subpixel
+ * falls back to `base`, the exact 1x result including the 1x
+ * true-color substitution. */
+static void tom_render_16bpp_cry_scanline_hires(uint32_t * backbuffer)
+{
+   unsigned i;
+   uint8_t s;
+   int n = shadowHiresN;
+   int sub, sx;
+   uint16_t width = tomWidth;
+   uint8_t * current_line_buffer = (uint8_t *)&tomRam8[0x1800];
+   uint8_t pwidth = ((GET16(tomRam8, VMODE) & PWIDTH) >> 9) + 1;
+   uint8_t pwidth_scale = (pwidth >= 8) ? (pwidth / 4) : 1;
+   int16_t startPos = GET16(tomRam8, HDB1) - (int16_t)TOMGetLeftVisibleHC();
+   uint16_t startPos_disp;
+   uint32_t *rows[SHADOWFB_HIRES_MAX_N];
+   int sfbIdx;
+   /* Hoisted out of the per-subpixel loop: with no texture pack active
+    * (the default, and every run of the base hi-res feature) this stays
+    * 0 and the replacement branch below costs nothing measurable. */
+   int replActive = (shadowHiresReplActive && shadowHiresLineRepl) ? 1 : 0;
+   startPos /= pwidth;
+
+   for (sub = 0; sub < n; sub++)
+      rows[sub] = backbuffer + (uint32_t)sub * screenPitch;
+
+   if (startPos < 0)
+      current_line_buffer += 2 * -startPos;
+   else
+   {
+      /* LEFT_BG_FIX border fill, replicated N wide x N sub-rows. */
+      uint8_t g = tomRam8[BORD1], r = tomRam8[BORD1 + 1], b = tomRam8[BORD2 + 1];
+      uint32_t pixel = 0xFF000000 | (r << 16) | (g << 8) | (b << 0);
+      startPos_disp = (uint16_t)startPos * pwidth_scale;
+      /* The border fill is part of the row, never longer than it: a left
+       * edge (HDB1) past the row width would otherwise wrap `width -= ...`
+       * below to ~65k and run the pixel loop off the end of the row. */
+      if (startPos_disp > width)
+         startPos_disp = width;
+
+      for (sub = 0; sub < n; sub++)
+         for (i = 0; i < (unsigned)startPos_disp * (unsigned)n; i++)
+            *rows[sub]++ = pixel;
+
+      width -= startPos_disp;
+   }
+
+   width = tom_clamp_line_buffer_width(current_line_buffer, width, 2, pwidth_scale);
+   sfbIdx = (int)((current_line_buffer - &tomRam8[0x1800]) >> 1);
+
+   while (width >= pwidth_scale)
+   {
+      uint32_t base;
+      const shadowfb_sub *ent;
+      const uint32_t *rent;
+      uint16_t color = (*current_line_buffer++) << 8;
+      color |= *current_line_buffer++;
+
+      /* `base` = the exact 1x result for this stock pixel (including
+       * the true-color substitution when that option is on). */
+      base = CRY16ToRGB32[color];
+      if (shadowFBActive && sfbIdx >= 0 && sfbIdx < SHADOWFB_LINE_PIXELS
+            && (shadowLineTag[sfbIdx] & SHADOWFB_TAG_VMASK)
+               == ((uint32_t)color | SHADOWFB_TAG_VALID))
+         base = 0xFF000000 | shadowLineRGB[sfbIdx];
+
+      for (sub = 0; sub < n; sub++)
+      {
+         ent  = NULL;
+         rent = NULL;
+         if (sfbIdx >= 0 && sfbIdx < SHADOWFB_LINE_PIXELS
+               && shadowHiresLineTag[sfbIdx] ==
+                  ((uint32_t)color | SHADOWFB_TAG_VALID))
+         {
+            uint32_t off = ((uint32_t)sub * SHADOWFB_LINE_PIXELS
+                            + (uint32_t)sfbIdx) * (uint32_t)n;
+            ent = shadowHiresLineSub + off;
+            if (replActive)
+               rent = shadowHiresLineRepl + off;
+         }
+         for (sx = 0; sx < n; sx++)
+         {
+            /* Stage 2: entries carry real per-subpixel content, so a
+             * hit renders each entry -- with true-color on, through
+             * ShadowFBCryRGB so the entry's own frac16 composes
+             * (design section 3.2); with it off, through the stock
+             * LUT.  A miss falls back to the exact 1x result.
+             *
+             * Tier 3 (issue #369): a pack subpixel wins over both.  It
+             * is absolute RGB888 rather than a CRY reconstruction, so
+             * it is presented as-is with no quantization -- and an
+             * author alpha hole (entry 0) falls straight through to
+             * the supersampled/stock content underneath. */
+            uint32_t out;
+            if (rent && (rent[sx] & SHADOWFB_HIRES_REPL_VALID))
+               out = 0xFF000000 | (rent[sx] & 0x00FFFFFF);
+            else if (ent)
+               out = shadowFBActive
+                   ? (0xFF000000
+                      | ShadowFBCryRGB(ent[sx].value16, ent[sx].frac16))
+                   : CRY16ToRGB32[ent[sx].value16];
+            else
+               out = base;
+            for (s = 0; s < pwidth_scale; s++)
+               *rows[sub]++ = out;
+         }
+      }
+      sfbIdx++;
+      width -= pwidth_scale;
+   }
+}
+
+/* Hi-res (Nx) RGB16-direct renderer -- issue #382.
+ *
+ * Mirrors tom_render_16bpp_cry_scanline_hires above, but backs
+ * tom_render_16bpp_rgb_scanline (video mode 3, TOMGetVideoMode()==3;
+ * scanline_render[3] and the identical [7] duplicate slot).
+ *
+ * Scope-check for #382 established that the Nx shadow STORE side
+ * (ShadowHiresStoreCry/Block in blitter.c, ShadowHiresLineFromRAM in
+ * op.c) is not gated on video mode or CRY-vs-RGB pixel interpretation at
+ * all -- it is gated purely on blit/OP PIXEL SIZE == 16bpp (see the
+ * "Hi-res (Stage 1): every 16bpp destination write, not just gouraud"
+ * comment on the accurate blitter engine's store call).  TOM's video
+ * mode register only decides how a raw 16-bit RAM word gets
+ * *interpreted* at scanout time; the shadow store captures the raw word
+ * itself, so the same Nx shadow line buffer that already feeds the CRY
+ * hires renderer above already carries genuine content for RGB16
+ * destinations wherever the blitter/OP produced it -- this renderer is
+ * the missing consumer, not a new producer.  Confirmed empirically
+ * (dylib probe, video_mode==3 titles): shadow pages get allocated and
+ * resolved for RGB16-mode content exactly like CRY (e.g. Alien vs
+ * Predator's menu screens, Club Drive), independent of format.
+ *
+ * {value16, frac16} reconstruction is NOT the same as CRY's, though:
+ *   - CRY's value16 packs an 8-bit chroma/intensity pair, and frac16
+ *     supplies the sub-8-bit intensity fraction that GOURD/SRCSHADE
+ *     compute at higher precision internally but must truncate to write
+ *     to RAM; ShadowFBCryRGB recombines the pair through the chroma
+ *     tables for a smoother in-between shade.
+ *   - RGB16 has no chroma/intensity decomposition: value16 IS already a
+ *     complete, self-contained RGB pixel (whatever bit layout
+ *     RGB16ToRGB32 decodes), so there is no sub-quantization component
+ *     for a fraction to compose with.  frac16 is only ever nonzero out
+ *     of the CRY-shaped GOURD/SRCSHADE store sites (shadow_hires_sub_fast
+ *     / shadow_hires_sub_mid in blitter.c), which compute a source
+ *     *intensity* increment -- a concept RGB16 does not have anywhere in
+ *     this codebase, and the 1x RGB path (tom_render_16bpp_rgb_scanline)
+ *     never reads a fraction at all.  The correct, safe reconstruction is
+ *     therefore RGB16ToRGB32[value16], ignoring frac16 outright: a Stage
+ *     2 hit on a shading blit then degrades to exactly the truncated
+ *     value RAM actually holds (the same information a stock 1x RGB16
+ *     read would show), never to invented color.  The real benefit comes
+ *     from the plain-copy / LFU fractional-source-walk case, where
+ *     frac16 is always 0 and value16 alone already differs per subpixel
+ *     -- genuine spatial supersampling, no reconstruction needed.
+ *
+ * Also deliberately NOT wired in: true-color (shadowFBActive /
+ * shadowLineTag) substitution.  tom_render_16bpp_rgb_scanline (the 1x
+ * RGB renderer) has no true-color hookup either -- track 3 is CRY-only --
+ * so adding one here at 2x would make the 2x frame differ from the 1x
+ * frame by something that is not supersampling, breaking the
+ * box-replication identity this renderer must uphold on every miss.
+ *
+ * Texture-pack art IS wired in (issue #528), and by that same rule: the
+ * 1x RGB renderer presents packs too, through the same TomLinePackRGB
+ * seam, so `base` here carries the pack's 1x representative exactly as
+ * the CRY hires renderer's `base` carries the 1x substitution.  With no
+ * pack loaded shadowHiresReplActive and shadowFBReplActive are both 0,
+ * every branch below is predicted-not-taken, and the box-replication
+ * identity is untouched. */
+static void tom_render_16bpp_rgb_scanline_hires(uint32_t * backbuffer)
+{
+   unsigned i;
+   uint8_t s;
+   int n = shadowHiresN;
+   int sub, sx;
+   uint16_t width = tomWidth;
+   uint8_t * current_line_buffer = (uint8_t *)&tomRam8[0x1800];
+   uint8_t pwidth = ((GET16(tomRam8, VMODE) & PWIDTH) >> 9) + 1;
+   uint8_t pwidth_scale = (pwidth >= 8) ? (pwidth / 4) : 1;
+   int16_t startPos = GET16(tomRam8, HDB1) - (int16_t)TOMGetLeftVisibleHC();
+   uint16_t startPos_disp;
+   uint32_t *rows[SHADOWFB_HIRES_MAX_N];
+   int sfbIdx;
+   /* Hoisted exactly as in the CRY hires renderer: 0 for every run of
+    * the base hi-res feature, so the pack branches cost nothing. */
+   int replActive = (shadowHiresReplActive && shadowHiresLineRepl) ? 1 : 0;
+   startPos /= pwidth;
+
+   for (sub = 0; sub < n; sub++)
+      rows[sub] = backbuffer + (uint32_t)sub * screenPitch;
+
+   if (startPos < 0)
+      current_line_buffer += 2 * -startPos;
+   else
+   {
+      /* LEFT_BG_FIX border fill, replicated N wide x N sub-rows. */
+      uint8_t g = tomRam8[BORD1], r = tomRam8[BORD1 + 1], b = tomRam8[BORD2 + 1];
+      uint32_t pixel = 0xFF000000 | (r << 16) | (g << 8) | (b << 0);
+      startPos_disp = (uint16_t)startPos * pwidth_scale;
+      /* The border fill is part of the row, never longer than it: a left
+       * edge (HDB1) past the row width would otherwise wrap `width -= ...`
+       * below to ~65k and run the pixel loop off the end of the row. */
+      if (startPos_disp > width)
+         startPos_disp = width;
+
+      for (sub = 0; sub < n; sub++)
+         for (i = 0; i < (unsigned)startPos_disp * (unsigned)n; i++)
+            *rows[sub]++ = pixel;
+
+      width -= startPos_disp;
+   }
+
+   width = tom_clamp_line_buffer_width(current_line_buffer, width, 2, pwidth_scale);
+   sfbIdx = (int)((current_line_buffer - &tomRam8[0x1800]) >> 1);
+
+   while (width >= pwidth_scale)
+   {
+      uint32_t base;
+      const shadowfb_sub *ent;
+      const uint32_t *rent;
+      uint16_t color = (*current_line_buffer++) << 8;
+      color |= *current_line_buffer++;
+
+      /* `base` = the exact 1x result for this stock pixel: a plain
+       * RGB16ToRGB32 lookup, same as tom_render_16bpp_rgb_scanline --
+       * no true-color substitution (see comment above), but WITH the
+       * pack's 1x representative when one exists, because the 1x RGB
+       * renderer presents that too (issue #528). */
+      base = RGB16ToRGB32[color];
+      TomLinePackRGB(sfbIdx, color, &base);
+
+      for (sub = 0; sub < n; sub++)
+      {
+         ent  = NULL;
+         rent = NULL;
+         if (sfbIdx >= 0 && sfbIdx < SHADOWFB_LINE_PIXELS
+               && shadowHiresLineTag[sfbIdx] ==
+                  ((uint32_t)color | SHADOWFB_TAG_VALID))
+         {
+            uint32_t off = ((uint32_t)sub * SHADOWFB_LINE_PIXELS
+                            + (uint32_t)sfbIdx) * (uint32_t)n;
+            ent = shadowHiresLineSub + off;
+            if (replActive)
+               rent = shadowHiresLineRepl + off;
+         }
+         for (sx = 0; sx < n; sx++)
+         {
+            /* Pack art is absolute RGB888 and wins outright; an author
+             * alpha hole (entry 0) falls through.  Otherwise a hit
+             * renders each entry's raw value16 through the stock RGB16
+             * LUT (frac16 ignored -- see comment above); a miss falls
+             * back to `base`, the exact 1x result. */
+            uint32_t out;
+            if (rent && (rent[sx] & SHADOWFB_HIRES_REPL_VALID))
+               out = 0xFF000000 | (rent[sx] & 0x00FFFFFF);
+            else
+               out = ent ? RGB16ToRGB32[ent[sx].value16] : base;
+            for (s = 0; s < pwidth_scale; s++)
+               *rows[sub]++ = out;
+         }
+      }
+      sfbIdx++;
+      width -= pwidth_scale;
+   }
+}
+
+/* Hi-res dispatch for one scanline: CRY 16bpp and RGB16-direct 16bpp each
+ * get a dedicated Nx renderer above; every other mode (CLUT, 24bpp,
+ * CRY/RGB mix) renders stock at 1x into a scratch row and is
+ * box-replicated at output (Stage 1 scope fence; issue #382 assessed
+ * those on the same CRY-vs-RGB evidence basis and found no shadow-store
+ * coverage worth extending yet).
+ *
+ * The scratch is seeded from the existing Nx row (sub-row 0, every Nth
+ * pixel) so pixels the stock renderer leaves untouched -- e.g. the tail
+ * beyond the last full pwidth step -- keep their previous value, exactly
+ * as they would at 1x.  By induction from the black-filled initial
+ * buffer, the Nx frame therefore stays an exact box replication of the
+ * 1x frame for every mode. */
+static uint32_t tomHiresScratch[1024];
+
+static void tom_render_scanline_hires(uint32_t * backbuffer)
+{
+   render_xxx_scanline_fn *fn = scanline_render[TOMGetVideoMode()];
+   unsigned i, s, r;
+   unsigned n = (unsigned)shadowHiresN;
+   unsigned w = (tomWidth < 1024) ? tomWidth : 1024;
+   uint32_t *dst;
+   uint32_t px;
+#if defined(BLITTER_SIMD_HAVE_NEON)
+   unsigned neon_done;
+#elif defined(BLITTER_SIMD_HAVE_SSE2)
+   unsigned sse2_done;
+#endif
+
+   if (fn == tom_render_16bpp_cry_scanline)
+   {
+      tom_render_16bpp_cry_scanline_hires(backbuffer);
+      return;
+   }
+
+   if (fn == tom_render_16bpp_rgb_scanline)
+   {
+      tom_render_16bpp_rgb_scanline_hires(backbuffer);
+      return;
+   }
+
+#if defined(BLITTER_SIMD_HAVE_NEON)
+   /* n==2 is Stage 1. Compiler autovec of the runtime-n loops only
+    * fires for n==1 (gather) or n>7 (expand); the common 2x path
+    * stays scalar without this. */
+   if (n == 2u)
+   {
+      neon_done = tom_scan_neon_hires_gather_n2(backbuffer, tomHiresScratch, w);
+      for (i = neon_done; i < w; i++)
+         tomHiresScratch[i] = backbuffer[i * n];
+   }
+   else
+#elif defined(BLITTER_SIMD_HAVE_SSE2)
+   /* Same n==2 gate as the NEON branch above. */
+   if (n == 2u)
+   {
+      sse2_done = tom_scan_sse2_hires_gather_n2(backbuffer, tomHiresScratch, w);
+      for (i = sse2_done; i < w; i++)
+         tomHiresScratch[i] = backbuffer[i * n];
+   }
+   else
+#endif
+   {
+      for (i = 0; i < w; i++)
+         tomHiresScratch[i] = backbuffer[i * n];
+   }
+   fn(tomHiresScratch);
+   for (r = 0; r < n; r++)
+   {
+      dst = backbuffer + r * screenPitch;
+#if defined(BLITTER_SIMD_HAVE_NEON)
+      if (n == 2u)
+      {
+         neon_done = tom_scan_neon_hires_expand_n2(tomHiresScratch, dst, w);
+         dst += neon_done * 2u;
+         i = neon_done;
+      }
+      else
+         i = 0;
+#elif defined(BLITTER_SIMD_HAVE_SSE2)
+      if (n == 2u)
+      {
+         sse2_done = tom_scan_sse2_hires_expand_n2(tomHiresScratch, dst, w);
+         dst += sse2_done * 2u;
+         i = sse2_done;
+      }
+      else
+         i = 0;
+#else
+      i = 0;
+#endif
+      for (; i < w; i++)
+      {
+         px = tomHiresScratch[i];
+         for (s = 0; s < n; s++)
+            *dst++ = px;
+      }
+   }
+}
+
+// 24 BPP mode rendering
+void tom_render_24bpp_scanline(uint32_t * VJ_RESTRICT backbuffer)
+{
+   unsigned i;
+   uint8_t s;
+   uint16_t width = tomWidth;
+   uint8_t * VJ_RESTRICT current_line_buffer = (uint8_t *)&tomRam8[0x1800];
+   uint8_t pwidth = ((GET16(tomRam8, VMODE) & PWIDTH) >> 9) + 1;
+   uint8_t pwidth_scale = (pwidth >= 8) ? (pwidth / 4) : 1;
+   int16_t startPos = GET16(tomRam8, HDB1) - (int16_t)TOMGetLeftVisibleHC();
+   uint16_t startPos_disp;
+   startPos /= pwidth;
+
+   if (startPos < 0)
+      current_line_buffer += 4 * -startPos;
+   else
+#ifdef LEFT_BG_FIX
+   {
+      uint8_t g = tomRam8[BORD1], r = tomRam8[BORD1 + 1], b = tomRam8[BORD2 + 1];
+      uint32_t pixel = 0xFF000000 | (r << 16) | (g << 8) | (b << 0);
+      startPos_disp = (uint16_t)startPos * pwidth_scale;
+      /* The border fill is part of the row, never longer than it: a left
+       * edge (HDB1) past the row width would otherwise wrap `width -= ...`
+       * below to ~65k and run the pixel loop off the end of the row. */
+      if (startPos_disp > width)
+         startPos_disp = width;
+
+      for(i = 0; i < startPos_disp; i++)
+         *backbuffer++ = pixel;
+
+      width -= startPos_disp;
+   }
+#else
+   backbuffer += 2 * startPos, width -= startPos;
+#endif
+
+   width = tom_clamp_line_buffer_width(current_line_buffer, width, 4, pwidth_scale);
+#if defined(BLITTER_SIMD_HAVE_NEON)
+   if (pwidth_scale == 1)
+   {
+      unsigned n;
+      n = tom_scan_neon_24bpp(current_line_buffer, backbuffer, width);
+      current_line_buffer += n * 4;
+      backbuffer += n;
+      width = (uint16_t)(width - n);
+   }
+#elif defined(BLITTER_SIMD_HAVE_SSE2)
+   if (pwidth_scale == 1)
+   {
+      unsigned n;
+      n = tom_scan_sse2_24bpp(current_line_buffer, backbuffer, width);
+      current_line_buffer += n * 4;
+      backbuffer += n;
+      width = (uint16_t)(width - n);
+   }
+#endif
+   while (width >= pwidth_scale)
+   {
+      uint32_t b;
+      uint32_t g = *current_line_buffer++;
+      uint32_t r = *current_line_buffer++;
+      uint32_t pixel;
+      current_line_buffer++;
+      b = *current_line_buffer++;
+      pixel = 0xFF000000 | (r << 16) | (g << 8) | (b << 0);
+      for (s = 0; s < pwidth_scale; s++)
+         *backbuffer++ = pixel;
+      width -= pwidth_scale;
+   }
+}
+
+//Seems to me that this is NOT a valid mode--the JTRM seems to imply that you would need
+//extra hardware outside of the Jaguar console to support this!
+// 16 BPP direct mode rendering
+void tom_render_16bpp_direct_scanline(uint32_t * VJ_RESTRICT backbuffer)
+{
+   uint8_t s;
+   uint16_t width = tomWidth;
+   uint8_t * VJ_RESTRICT current_line_buffer = (uint8_t *)&tomRam8[0x1800];
+   uint8_t pwidth = ((GET16(tomRam8, VMODE) & PWIDTH) >> 9) + 1;
+   uint8_t pwidth_scale = (pwidth >= 8) ? (pwidth / 4) : 1;
+
+   width = tom_clamp_line_buffer_width(current_line_buffer, width, 2, pwidth_scale);
+#if defined(BLITTER_SIMD_HAVE_NEON)
+   if (pwidth_scale == 1)
+   {
+      unsigned n;
+      n = tom_scan_neon_16bpp_direct(current_line_buffer, backbuffer, width);
+      current_line_buffer += n * 2;
+      backbuffer += n;
+      width = (uint16_t)(width - n);
+   }
+#elif defined(BLITTER_SIMD_HAVE_SSE2)
+   if (pwidth_scale == 1)
+   {
+      unsigned n;
+      n = tom_scan_sse2_16bpp_direct(current_line_buffer, backbuffer, width);
+      current_line_buffer += n * 2;
+      backbuffer += n;
+      width = (uint16_t)(width - n);
+   }
+#endif
+   while (width >= pwidth_scale)
+   {
+      uint16_t color = (*current_line_buffer++) << 8;
+      color |= *current_line_buffer++;
+      for (s = 0; s < pwidth_scale; s++)
+         *backbuffer++ = color >> 1;
+      width -= pwidth_scale;
+   }
+}
+
+
+/* 16 BPP RGB mode rendering.
+ *
+ * Texture packs present here as well as on the CRY path (issue #528).
+ * The two were wired TOGETHER on purpose: tier 3 (#526) left RGB16
+ * unwired at both 1x and Nx precisely so a pack could not look
+ * different at 2x than at 1x for a reason unrelated to resolution, and
+ * wiring one without the other would recreate exactly that defect.
+ * A corpus census (162 ROMs, TOM VMODE sampled per frame) settled the
+ * "which titles" question the deferral left open: RGB16-direct is not a
+ * niche path -- it is the majority scanout mode for most of the library,
+ * including Alien vs Predator, which parks at VMODE=$06C7 from frame 30
+ * and never leaves it.
+ *
+ * Only pack art substitutes here, never a true-color CRY
+ * reconstruction; see TomLinePackRGB above. */
+void tom_render_16bpp_rgb_scanline(uint32_t * VJ_RESTRICT backbuffer)
+{
+   unsigned i;
+   uint8_t s;
+   uint16_t width = tomWidth;
+   uint8_t * VJ_RESTRICT current_line_buffer = (uint8_t *)&tomRam8[0x1800];
+   uint8_t pwidth = ((GET16(tomRam8, VMODE) & PWIDTH) >> 9) + 1;
+   uint8_t pwidth_scale = (pwidth >= 8) ? (pwidth / 4) : 1;
+   int16_t startPos = GET16(tomRam8, HDB1) - (int16_t)TOMGetLeftVisibleHC();
+   uint16_t startPos_disp;
+   startPos /= pwidth;
+
+   if (startPos < 0)
+      current_line_buffer += 2 * -startPos;
+   else
+#ifdef LEFT_BG_FIX
+   {
+      uint8_t g = tomRam8[BORD1], r = tomRam8[BORD1 + 1], b = tomRam8[BORD2 + 1];
+      uint32_t pixel = 0xFF000000 | (r << 16) | (g << 8) | (b << 0);
+      startPos_disp = (uint16_t)startPos * pwidth_scale;
+      /* The border fill is part of the row, never longer than it: a left
+       * edge (HDB1) past the row width would otherwise wrap `width -= ...`
+       * below to ~65k and run the pixel loop off the end of the row. */
+      if (startPos_disp > width)
+         startPos_disp = width;
+
+      for(i = 0; i < startPos_disp; i++)
+         *backbuffer++ = pixel;
+
+      width -= startPos_disp;
+   }
+#else
+   backbuffer += 2 * startPos, width -= startPos;
+#endif
+
+   width = tom_clamp_line_buffer_width(current_line_buffer, width, 2, pwidth_scale);
+
+   /* Pack-present path.  Split from the stock loop rather than folded
+    * into it so that with no pack loaded -- every ordinary run, True
+    * Color included -- the code below is byte-for-byte the loop that
+    * shipped before #528. */
+   if (shadowFBActive && shadowFBReplActive)
+   {
+      int sfbIdx = (int)((current_line_buffer - &tomRam8[0x1800]) >> 1);
+      while (width >= pwidth_scale)
+      {
+         uint32_t out;
+         uint16_t color = (*current_line_buffer++) << 8;
+         color |= *current_line_buffer++;
+         out = RGB16ToRGB32[color];
+         TomLinePackRGB(sfbIdx, color, &out);
+         sfbIdx++;
+         for (s = 0; s < pwidth_scale; s++)
+            *backbuffer++ = out;
+         width -= pwidth_scale;
+      }
+      return;
+   }
+
+#if defined(BLITTER_SIMD_HAVE_NEON)
+   if (pwidth_scale == 1)
+   {
+      unsigned n;
+      n = tom_scan_neon_16bpp_rgb(current_line_buffer, backbuffer, width);
+      current_line_buffer += n * 2;
+      backbuffer += n;
+      width = (uint16_t)(width - n);
+   }
+#elif defined(BLITTER_SIMD_HAVE_SSE2)
+   if (pwidth_scale == 1)
+   {
+      unsigned n;
+      n = tom_scan_sse2_16bpp_rgb(current_line_buffer, backbuffer, width);
+      current_line_buffer += n * 2;
+      backbuffer += n;
+      width = (uint16_t)(width - n);
+   }
+#endif
+   while (width >= pwidth_scale)
+   {
+      uint32_t color = (*current_line_buffer++) << 8;
+      color |= *current_line_buffer++;
+      for (s = 0; s < pwidth_scale; s++)
+         *backbuffer++ = RGB16ToRGB32[color];
+      width -= pwidth_scale;
+   }
+}
+
+// Process a single scanline
+/* ---- light gun: LPH / LPV synthesis (#438) --------------------------
+ *
+ * TR10: "A TTL rising edge on the LP signal (pin 6 of Port 1, shared with
+ * B0) causes the light pen registers (LPH and LPV) to be latched."  On
+ * real hardware that edge comes from the gun's photodiode seeing the beam
+ * sweep past where the barrel is pointed, so it fires ONCE PER FIELD, on
+ * the half-line the aim point sits on -- not when the trigger is pulled.
+ * The trigger is an ordinary controller button (inputdev.h explains how
+ * Balloons proves this and why it must be so).
+ *
+ * That is exactly what this models: called from TOMExecHalfline for every
+ * half-line, it latches when the beam reaches the aimed-at row.  No beam
+ * hit-test window, no pulse generator, and above all no per-clock
+ * horizontal counter -- which this core does not have (HC advances once
+ * per half-line here) and which a corpus scan says nothing needs: no
+ * shipped title reads HC/VC ($F00004/$F00006) at all, Balloons included.
+ * Synthesising the latched value from the aim point is therefore not a
+ * shortcut around a timing model, it is the whole of the observable
+ * behaviour.
+ *
+ * The forward map is the inverse of what the renderers already do:
+ * TOMGetLeftVisibleHC() is the fixed HC origin of framebuffer column 0
+ * (the same origin `startPos = HDB1 - leftHC` is measured from), and one
+ * framebuffer column is PWIDTH video clocks wide (VMODE bits 9-11, "width
+ * of pixel in video clock cycles", value written + 1).  Vertically,
+ * TOMExecHalfline writes framebuffer row r at half-line
+ * topVisible + 2*r, so the latched VC of row r is exactly that.  Both
+ * quantities are read live from the registers, so a title that reprograms
+ * its display geometry (Balloons does: HDB1, HDE, VDB and PWIDTH=3 are
+ * all its own) is followed automatically, and PAL/NTSC needs no branch
+ * here because TOMGetTopVisible()/TOMGetLeftVisibleHC() already resolve it.
+ *
+ * `col`/`row` arrive as NATIVE framebuffer pixels: libretro.c divides the
+ * internal-resolution factor out before feeding them, so a 2x session
+ * latches byte-identical LPH/LPV to a 1x one (#400's lesson -- the
+ * enhancement path must be invisible to the emulated machine).
+ *
+ * LPH IS A GAP-FREE HORIZONTAL COUNT, deliberately, and this is the one
+ * place the implementation departs from a literal reading of the
+ * hardware.  TOM encodes HC as bit 10 = "second half-line" plus a 0..HP
+ * offset, so raw values jump 845 -> 1024 mid-line (NTSC), a 179-count
+ * hole.  Balloons' decoder is `(LPH - calibration_LPH) / PWIDTH`, with no
+ * bit-10 handling at all, so that hole would land as a ~60-pixel step in
+ * the middle of its playfield: aim right of centre and the shot lands 60
+ * pixels further right than the crosshair.  Emitting a linear count makes
+ * the ROM exact across the whole screen.  Nothing else in this core reads
+ * LPH, so there is no second consumer to keep consistent.
+ *
+ * MEASURED, not argued.  Both encodings were built and run against the
+ * ROM (test/tools/test_lightgun.c sweeps 21 aim points across the width):
+ *
+ *   linear   every point exact -- aim column C decodes to object X
+ *            C - startPos, from column 0 to the right edge.
+ *   bit-10   exact up to column 237, then column 238 decodes to object X
+ *            318 instead of 259.  +59 pixels, i.e. the 179-count hole
+ *            divided by Balloons' PWIDTH of 3, appearing exactly where
+ *            the half-line boundary falls in its geometry.
+ *
+ * Balloons' CALIBRATION SCREEN PASSES UNDER BOTH, because it only records
+ * the raw LPH it is handed and range-checks LPV -- so "calibration works"
+ * is not evidence the transform is right, and a single-point aim test on
+ * the left half would have shipped the wrong encoding.
+ *
+ * Savestates come for free: state.h saves tomRam8 wholesale, so the
+ * latched pair is already covered with no new chunk and no version bump. */
+static void TOMLightgunHalfline(uint16_t halfline)
+{
+   int32_t  col = 0;
+   int32_t  row = 0;
+   uint32_t pwidth;
+   uint32_t hc;
+   uint32_t vc;
+
+   if (!InputDevLightgunAim(&col, &row))
+      return;
+
+   if (col < 0 || row < 0)
+      return;
+
+   vc = (uint32_t)TOMGetTopVisible() + ((uint32_t)row * 2);
+
+   if (vc > 0x07FF || (uint32_t)halfline != vc)
+      return;
+
+   pwidth = (uint32_t)(((GET16(tomRam8, VMODE) & PWIDTH) >> 9) + 1);
+   hc     = TOMGetLeftVisibleHC() + ((uint32_t)col * pwidth);
+
+   /* Both registers are 11 bits (jtrm-register-map.md).  A real line is
+    * ~1690 video clocks, so a legal aim point never reaches the clamp;
+    * it is here so a garbage geometry cannot wrap the value round. */
+   if (hc > 0x07FF)
+      hc = 0x07FF;
+
+   SET16(tomRam8, LPH, (uint16_t)hc);
+   SET16(tomRam8, LPV, (uint16_t)vc);
+}
+
+void TOMExecHalfline(uint16_t halfline, bool render)
+{
+   unsigned i;
+   uint16_t field2 = halfline & 0x0800;
+   bool inActiveDisplayArea = true;
+   uint16_t startingHalfline;
+   uint16_t endingHalfline;
+   uint16_t lateEndHalfline = 0;
+   uint32_t * TOMCurrentLine = 0;
+   uint16_t topVisible;
+   uint16_t bottomVisible;
+   uint16_t hp = GET16(tomRam8, HP);
+   uint32_t writtenRow;
+
+   halfline &= 0x07FF;
+
+   /* Halfline 0 is the frame wrap: latch the row count for the frame that
+    * just finished before halfline 0 contributes to the next one.
+    * JaguarExecuteNew ends its frame right after this call, so a caller
+    * reading TOMGetWrittenRowExtent() from retro_run sees the frame it is
+    * about to present. */
+   if (halfline == 0)
+   {
+      tomRowsWrittenLast = (tomRowsWrittenCur > tomRowsWrittenPrev)
+                         ? tomRowsWrittenCur : tomRowsWrittenPrev;
+      tomRowsWrittenPrev = tomRowsWrittenCur;
+      tomRowsWrittenCur  = 0;
+   }
+
+   // Update HC to approximate position within the scanline.
+   // Bit 10 (0x0400) is the half-line indicator, analogous to VC's
+   // field bit 11. The OP tests this via CONDITION_SECOND_HALF_LINE.
+   // Bits 0-9 approximate the position within the half-line.
+   if (halfline & 0x01)
+   {
+      SET16(tomRam8, HC, 0x0400 | (hp > 0 ? (hp + 1) / 2 : 0));
+      tomHCReadPhase = hp > 0 ? (hp + 1) / 2 : 0;
+   }
+   else
+   {
+      SET16(tomRam8, HC, 0);
+      tomHCReadPhase = 0;
+   }
+
+   /* Light gun LP edge (#438).  Before the odd-half-line early-out below,
+    * because an aim point can sit on an odd half-line and the latch is
+    * per-half-line, not per-OP-pass.  A no-op with no gun attached. */
+   TOMLightgunHalfline(halfline);
+
+   /* Execute OP only on even halflines; higher horizontal resolutions need
+    * more precise halfline scheduling. */
+   if (halfline & 0x01)
+      return;
+
+   /* After the odd-halfline guard deliberately: those run no OP pass, and
+    * counting them would dilute the average with no-ops.  No return between
+    * here and VJP_LEAVE -- see the placement rule in perf_iface.h. */
+   VJP_ENTER(VJP_OP);
+
+   // Initial values that "well behaved" programs use
+   startingHalfline = GET16(tomRam8, VDB);
+   endingHalfline = GET16(tomRam8, VDE);
+
+   // Simulate the OP start bug here!
+   // Really, this value is somewhere around 507 for an NTSC Jaguar. But this
+   // should work in a majority of cases, at least until we can figure it out properly.
+   if (endingHalfline > GET16(tomRam8, VP))
+   {
+      startingHalfline = 0;
+
+      /* A VDE past the end of the field is the documented "OP runs every
+       * line" idiom (JTRM: set VDE=$FFFF to work around the VDE-compare
+       * bug), not a request to run the object list through vertical
+       * blanking as well.  Left unclamped it does exactly that, and the
+       * extra passes are destructive rather than merely wasted: the OP
+       * decrements an object's HEIGHT and advances its DATA pointer on
+       * every pass that reaches it, so a pass landing after the game has
+       * rebuilt its list for the next field silently eats the first line
+       * of every object in it.
+       *
+       * Super Burnout (#632) is the case that exposed this.  It sets
+       * VDB=25, VDE=$7FF, VP=523, VBB=500, VI=521, and rebuilds the
+       * display list in its vertical-interrupt handler.  The OP then ran
+       * once more at halfline 522 -- one halfline after VI -- consuming
+       * line 0 of the freshly written HUD object.  The visible result was
+       * the top scanline missing from the whole first HUD text row, so LAP
+       * rendered as LHP and POSITION as POSTTTON, identically on both
+       * blitters because the blitter was never involved.
+       *
+       * Clamp to the VISIBLE window, which is where the line-copy loop
+       * below stops reading: a pass at or past bottomVisible produces a
+       * line buffer nobody ever copies out, so declining to run it cannot
+       * change the picture, while running it can corrupt the next field.
+       *
+       * Not VBB.  Clamping to VBB was the first attempt and it was wrong:
+       * blanking begins before the display window ends on this hardware
+       * (NTSC VBB=500 against a visible window running to 511), so it cut
+       * the bottom three scanlines off every title using the VDE=$FFFF
+       * idiom -- about a third of the private corpus, including Hover
+       * Strike, JSSDemo and JagFest Demo.  "Only Super Burnout does this"
+       * was measured on five ROMs and did not survive 160. */
+      {
+         uint16_t visible_end = TOMGetBottomVisible();
+         if (visible_end > 0 && visible_end < endingHalfline)
+         {
+            lateEndHalfline = GET16(tomRam8, VP);
+            endingHalfline = visible_end;
+         }
+      }
+   }
+
+   if ((halfline >= startingHalfline) && (halfline < endingHalfline))
+   {
+      if (render)
+      {
+         uint8_t * VJ_RESTRICT current_line_buffer = (uint8_t *)&tomRam8[0x1800];
+         uint8_t bgHI = tomRam8[BG], bgLO = tomRam8[BG + 1];
+
+         // Clear line buffer with BG
+         if (GET16(tomRam8, VMODE) & BGEN) // && (CRY or RGB16)...
+         {
+            /* Widened from 1440 byte stores to 720 word stores (#569/P8).
+             * Write the first pixel byte-by-byte (same order as the loop
+             * this replaces: high byte, then low byte), then re-load it
+             * as a native 16-bit word and replicate that word the rest
+             * of the way. This is a raw RAM-to-RAM repeat, not an
+             * endian-corrected value, so it is safe on any host byte
+             * order -- see the paletteRAM16 comment in op.c for the same
+             * "OK for direct copies, not for endian-corrected data"
+             * pattern applied to this exact line buffer.
+             * No hand-written NEON: clang/gcc -O3 already emit dup+stp.
+             * VJ_RESTRICT helps autovec on other targets. */
+            uint16_t * VJ_RESTRICT current_line_buffer16 = (uint16_t *)current_line_buffer;
+            uint16_t bgPixel;
+
+            current_line_buffer[0] = bgHI;
+            current_line_buffer[1] = bgLO;
+            bgPixel = current_line_buffer16[0];
+
+            for (i = 1; i < 720; i++)
+               current_line_buffer16[i] = bgPixel;
+         }
+
+         OPProcessList(halfline, render);
+      }
+   }
+   else
+   {
+      inActiveDisplayArea = false;
+      /* The clamp above keeps late passes off bitmap objects, but the OP
+       * still runs on these lines on hardware: a list that parks a GPU
+       * object on a blanking line gets its interrupt there.  Vid Grid
+       * (VDE=$7FF, VP=523) branches to a GPU object only at VC==518 and
+       * builds its movie bitmaps from that ISR; without the pass it
+       * showed a black screen over running movie audio.  Walk the list
+       * with bitmaps skipped so branch/GPU/stop objects still fire. */
+      if (render && lateEndHalfline != 0
+          && halfline >= endingHalfline && halfline < lateEndHalfline)
+         OPProcessListNoBitmaps(halfline);
+   }
+
+   // Derive visible window from VDB/VDE registers (with fallback)
+
+   topVisible = TOMGetTopVisible();
+   bottomVisible = TOMGetBottomVisible();
+
+   // Here's our virtualized scanline code...
+
+   if ((halfline >= topVisible) && (halfline < bottomVisible))
+   {
+      /* Hi-res (Nx): the stock row index maps to N consecutive Nx rows at
+       * the Nx pitch.  hiresRowScale is 1 whenever the option is off, so
+       * the stock path is unchanged (see shadowfb.h). */
+      uint32_t hiresRowScale = (uint32_t)shadowHiresN;
+
+      // Bit 0 in VP is interlace flag. 0 = interlace, 1 = non-interlaced.
+      // (JTRM Rev 8 p.15: half lines per field = VP+1, and an ODD half-line
+      // count is interlaced -- so the REGISTER's bit 0 carries the inverse
+      // sense: VP odd -> VP+1 even -> non-interlaced.  tomRam8[VP + 1] is
+      // the low byte of the 16-bit VP register, not VP+1 halflines.)
+      if (tomRam8[VP + 1] & 0x01)
+         writtenRow = (halfline - topVisible) / 2;//non-interlace
+      else
+         writtenRow = (((halfline - topVisible) / 2) * 2) + (field2 ? 0 : 1);//interlace
+
+      /* The host framebuffer is MAX_VISIBLE_HEIGHT stock rows tall (libretro.c
+       * VIDEO_BUFFER_HEIGHT).  The window clamp in TOMGetBottomVisible bounds
+       * halflines/2, which is the row count only when non-interlaced; an
+       * interlaced field spreads its rows across twice that range, so a wild
+       * VP/VDB/VDE (an even VP is interlace) made writtenRow reach ~1023 and
+       * every renderer below stored past the end of the buffer.  A row the
+       * buffer cannot hold is not presented, and is not counted as written. */
+      if (writtenRow >= MAX_VISIBLE_HEIGHT)
+      {
+         VJP_LEAVE(VJP_OP);
+         return;
+      }
+
+      TOMCurrentLine = &(screenBuffer[writtenRow * hiresRowScale * screenPitch]);
+
+      /* Record the row regardless of which branch below fills it: both the
+       * scanline renderer and the border fill count as TOM having addressed
+       * this row.  See TOMGetWrittenRowExtent(). */
+      if (writtenRow + 1 > tomRowsWrittenCur)
+         tomRowsWrittenCur = writtenRow + 1;
+
+      /* Presentation-skip (RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE): both
+       * branches below do nothing but store host XRGB8888 pixels into
+       * screenBuffer -- the CRY/RGB16 -> RGB32 conversion (stock, true-color
+       * or hi-res box-replication/supersampled) and the border-colour fill.
+       * screenBuffer is not addressable Jaguar memory, so skipping these
+       * stores is invisible to emulation; tomSkipVideoPresent stays 0
+       * (render as normal) unless the frontend just said this frame's
+       * video will be discarded. See the tom.h declaration for the full
+       * argument. */
+      if (!tomSkipVideoPresent)
+      {
+         if (inActiveDisplayArea)
+         {
+            if (shadowHiresActive)
+               tom_render_scanline_hires(TOMCurrentLine);
+            else
+               scanline_render[TOMGetVideoMode()](TOMCurrentLine);
+         }
+         else
+         {
+            // If outside of VDB & VDE, then display the border color
+            // (replicated across the N sub-rows / N-wide pixels at hi-res).
+            uint8_t      g = tomRam8[BORD1], r = tomRam8[BORD1 + 1], b = tomRam8[BORD2 + 1];
+            uint32_t pixel = 0xFF000000 | (r << 16) | (g << 8) | (b << 0);
+            uint32_t hr;
+
+            for (hr = 0; hr < hiresRowScale; hr++)
+            {
+               uint32_t * currentLineBuffer = TOMCurrentLine + hr * screenPitch;
+
+               for(i=0; i<tomWidth * hiresRowScale; i++)
+                  *currentLineBuffer++ = pixel;
+            }
+         }
+      }
+   }
+
+   VJP_LEAVE(VJP_OP);
+}
+
+// TOM initialization
+void TOMInit(void)
+{
+   TOMFillLookupTables();
+   OPInit();
+   BlitterInit();
+   TOMReset();
+}
+
+
+void TOMDone(void)
+{
+   OPDone();
+   BlitterDone();
+   GPUDone();
+}
+
+
+uint32_t TOMGetVideoModeWidth(void)
+{
+   uint16_t hdb1 = GET16(tomRam8, HDB1);
+   uint16_t hde = GET16(tomRam8, HDE);
+   uint16_t pwidth = ((GET16(tomRam8, VMODE) & PWIDTH) >> 9) + 1;
+   uint32_t leftHC = TOMGetLeftVisibleHC();
+   uint32_t rightHC = TOMGetRightVisibleHC();
+   uint32_t pwidth_scale = (pwidth >= 8) ? (pwidth / 4) : 1;
+
+   uint32_t dispStart = (hdb1 > leftHC) ? hdb1 : leftHC;
+   uint32_t dispEnd = (hde < rightHC) ? hde : rightHC;
+
+   if (dispEnd > dispStart && dispEnd > leftHC)
+   {
+      uint32_t width = ((dispEnd - leftHC) / pwidth) * pwidth_scale;
+      uint32_t startPos = (dispStart > leftHC)
+         ? ((dispStart - leftHC) / pwidth) * pwidth_scale : 0;
+
+      /* 652 = libretro retro_get_system_av_info max_width; matches the
+       * pwidth=8 fallback below. The old VIRTUAL_SCREEN_WIDTH (326) gate
+       * blocked pwidth=8 modes from reporting their actual register-derived
+       * width even though the fallback was free to return up to 652. */
+      if (width > 0 && width >= startPos && width <= 652)
+         return width;
+   }
+
+   return ((rightHC - leftHC) / pwidth) * pwidth_scale;
+}
+
+/* One past the highest framebuffer row TOMExecHalfline wrote in the frame that
+ * just completed.
+ *
+ * MEASURED, not derived from the registers.  Deriving it from VDB/VDE at the
+ * end of the frame gets the mid-frame reprogramming case wrong: rows are
+ * written across the whole frame, but the registers only describe the window
+ * as of the last halfline.  DEMO1B (PD) reprograms TOM at frame 476 -- the
+ * end-of-frame window computes 8 rows while the frame had actually just been
+ * rendered 240 rows wide, so a register-derived extent would report a
+ * 232-row gap that does not exist.  TOMExecHalfline records each row as it
+ * writes it instead, which cannot disagree with itself.
+ *
+ * This is NOT the same quantity as TOMGetVideoModeHeight(), which is the
+ * presented height and is derived independently from VDB/VDE.  The two
+ * disagree whenever the visible window and the mode height fall back
+ * differently -- e.g. Alien vs Predator in-game programs VDB=40, VDE=2047,
+ * VP=523, so topVisible=VDB=40 but bottomVisible falls back to the field
+ * bottom (511) because VDE > VP, giving 236 written rows against a presented
+ * height of 240 (the NTSC fallback, since (2047-40)/2 > 256).  Callers use
+ * this to give the leftover rows defined content instead of letting them keep
+ * whatever was last drawn there. */
+uint32_t TOMGetWrittenRowExtent(void)
+{
+   return tomRowsWrittenLast;
+}
+
+uint32_t TOMGetVideoModeHeight(void)
+{
+   uint16_t vdb = GET16(tomRam8, VDB);
+   uint16_t vde = GET16(tomRam8, VDE);
+
+   if (vde > vdb)
+   {
+      uint32_t height = (vde - vdb) / 2;
+      if (height > 0 && height <= 256)
+         return height;
+   }
+
+   return (vjs.hardwareTypeNTSC ? 240 : 256);
+}
+
+void TOMReset(void)
+{
+   OPReset();
+   BlitterReset();
+   memset(tomRam8, 0x00, 0x4000);
+
+   if (vjs.hardwareTypeNTSC)
+   {
+      SET16(tomRam8, MEMCON1, 0x1861);
+      SET16(tomRam8, MEMCON2, 0x35CC);
+      bus_arbiter_update_memcon(0x1861);
+      bus_arbiter_update_memcon2(0x35CC);
+      SET16(tomRam8, HP, 844);			// Horizontal Period (1-based; HP=845)
+      SET16(tomRam8, HBB, 1713);		// Horizontal Blank Begin
+      SET16(tomRam8, HBE, 125);			// Horizontal Blank End
+      SET16(tomRam8, HS, 1741);			// Horizontal Sync
+      SET16(tomRam8, HVS, 651);			// Horizontal Vertical Sync
+      SET16(tomRam8, HDB1, 203);		// Horizontal Display Begin 1
+      SET16(tomRam8, HDB2, 203);		// Horizontal Display Begin 2
+      SET16(tomRam8, HDE, 1665);		// Horizontal Display End
+      SET16(tomRam8, VP, 523);			// Vertical Period (1-based; in this case VP = 524)
+      SET16(tomRam8, VBB, 500);			// Vertical Blank Begin
+      SET16(tomRam8, VBE, 24);			// Vertical Blank End
+      SET16(tomRam8, VS, 517);			// Vertical Sync
+      SET16(tomRam8, VDB, 38);			// Vertical Display Begin
+      SET16(tomRam8, VDE, 518);			// Vertical Display End
+      SET16(tomRam8, VEB, 511);			// Vertical Equalization Begin
+      SET16(tomRam8, VEE, 6);			// Vertical Equalization End
+      // VI left at 0: the (vc > 0) guard in HalflineCallback disables
+      // video interrupts until the BIOS or game writes a real VI value.
+      SET16(tomRam8, HEQ, 784);			// Horizontal Equalization End
+      SET16(tomRam8, BG, 0);			// Background color (black)
+      SET16(tomRam8, VMODE, 0x06C1);
+   }
+   else	// PAL Jaguar
+   {
+      SET16(tomRam8, MEMCON1, 0x1861);
+      SET16(tomRam8, MEMCON2, 0x35CC);
+      bus_arbiter_update_memcon(0x1861);
+      bus_arbiter_update_memcon2(0x35CC);
+      SET16(tomRam8, HP, 850);			// Horizontal Period
+      SET16(tomRam8, HBB, 1711);		// Horizontal Blank Begin
+      SET16(tomRam8, HBE, 158);			// Horizontal Blank End
+      SET16(tomRam8, HS, 1749);			// Horizontal Sync
+      SET16(tomRam8, HVS, 601);			// Horizontal Vertical Sync
+      SET16(tomRam8, HDB1, 203);		// Horizontal Display Begin 1
+      SET16(tomRam8, HDB2, 203);		// Horizontal Display Begin 2
+      SET16(tomRam8, HDE, 1665);		// Horizontal Display End
+      SET16(tomRam8, VP, 623);			// Vertical Period (1-based; in this case VP = 624)
+      SET16(tomRam8, VBB, 600);			// Vertical Blank Begin
+      SET16(tomRam8, VBE, 34);			// Vertical Blank End
+      SET16(tomRam8, VS, 618);			// Vertical Sync
+      SET16(tomRam8, VDB, 38);			// Vertical Display Begin
+      SET16(tomRam8, VDE, 518);			// Vertical Display End
+      SET16(tomRam8, VEB, 613);			// Vertical Equalization Begin
+      SET16(tomRam8, VEE, 6);			// Vertical Equalization End
+      SET16(tomRam8, HEQ, 787);			// Horizontal Equalization End
+      SET16(tomRam8, BG, 0);			// Background color (black)
+      SET16(tomRam8, VMODE, 0x06C1);
+   }
+
+   tomWidth = 0;
+   tomHeight = 0;
+
+   tomRowsWrittenCur = 0;
+   tomRowsWrittenPrev = 0;
+   tomRowsWrittenLast = 0;
+
+   tom_jerry_int_pending = 0;
+   tom_timer_int_pending = 0;
+   tom_object_int_pending = 0;
+   tom_gpu_int_pending = 0;
+   tom_video_int_pending = 0;
+
+   tomTimerPrescaler = 0;					// TOM PIT is disabled
+   tomTimerDivider = 0;
+   tomTimerCounter = 0;
+   tomHCReadPhase = 0;
+}
+
+void TOMPITCallback(void);
+
+/* MISC.NET Dtp/Dt drive the live prescaler/divider onto the read bus.
+ * Derive them from the already-serialized scheduled expiration, in full
+ * system clocks (JTRM v8 p.15).  Reads have scheduler-slice resolution;
+ * they must not advance time or reschedule the interrupt. */
+static uint16_t TOMReadPIT(int divider)
+{
+   double usecs = GetCallbackTime(TOMPITCallback, EVENT_MAIN);
+   double tick = vjs.hardwareTypeNTSC ? RISC_CYCLE_IN_USEC : RISC_CYCLE_PAL_IN_USEC;
+   uint64_t clocks;
+   uint32_t period = tomTimerPrescaler + 1;
+   if (!tomTimerPrescaler || usecs < 0.0)
+      return 0;
+   clocks = (uint64_t)(usecs / tick + 0.5);
+   if (!clocks)
+      return 0;
+   return divider ? (uint16_t)((clocks - 1) / period)
+      : (uint16_t)((clocks - 1) % period);
+}
+
+/* IODEC.NET Float1-5 selects MEMCON1 unless a readable target is
+ * decoded.  GB1/GB2 select separate GPU bus windows at $2000 and
+ * above; preserve their existing handling here. Internal video timing
+ * uses accessors, not bus reads of write-only registers. */
+static bool TOMReadable(uint32_t offset)
+{
+   uint32_t word = offset & 0xFFFE;
+   if (word <= 0x000A || (word >= 0x0010 && word <= 0x0016)
+      || word == 0x0020 || word == 0x0022 || word == 0x0050
+      || word == 0x0052 || word == 0x00E0 || word == 0x0200)
+      return true;
+   return word >= 0x2000 || (word >= 0x0400 && word < 0x0800)
+      || (word >= 0x1000 && word < 0x2000);
+}
+
+uint8_t TOMReadByte(uint32_t offset, uint32_t who)
+{
+   //???Is this needed???
+   // It seems so. Perhaps it's the +$8000 offset being written to (32-bit interface)?
+   // However, the 32-bit interface is WRITE ONLY, so that can't be it...
+   // Also, the 68K CANNOT make use of the 32-bit interface, since its bus width is only 16-bits...
+   //	offset &= 0xFF3FFF;
+
+   if ((offset >= GPU_CONTROL_RAM_BASE) && (offset < GPU_CONTROL_RAM_BASE+0x20))
+      return GPUReadByte(offset, who);
+   else if ((offset >= GPU_WORK_RAM_BASE) && (offset < GPU_WORK_RAM_BASE+0x1000))
+      return GPUReadByte(offset, who);
+   else if ((offset >= 0xF02200) && (offset < 0xF022A0))
+      return BlitterReadByte(offset, who);
+   else if (offset == 0xF00050)
+      return TOMReadPIT(0) >> 8;
+   else if (offset == 0xF00051)
+      return TOMReadPIT(0) & 0xFF;
+   else if (offset == 0xF00052)
+      return TOMReadPIT(1) >> 8;
+   else if (offset == 0xF00053)
+      return TOMReadPIT(1) & 0xFF;
+   else if (offset == 0xF000E0)
+      return 0;
+   else if (offset == 0xF000E1)
+      return TOMIRQControlReg() & 0xFF;
+
+   if (!TOMReadable(offset))
+      return tomRam8[MEMCON1 + (offset & 1)];
+   return tomRam8[offset & 0x3FFF];
+}
+
+
+// TOM word access (read)
+uint16_t TOMReadWord(uint32_t offset, uint32_t who)
+{
+   if (offset == 0xF000E0)
+   {
+      // For reading, should only return the lower 5 bits...
+      uint16_t data = (tom_jerry_int_pending << 4) | (tom_timer_int_pending << 3)
+         | (tom_object_int_pending << 2) | (tom_gpu_int_pending << 1)
+         | (tom_video_int_pending << 0);
+      return data;
+   }
+   else if (offset == 0xF00004)
+   {
+      uint16_t hc = GET16(tomRam8, HC);
+      uint16_t hp = GET16(tomRam8, HP);
+      uint16_t limit = hp > 0 ? (hp + 1) / 2 : 0x400;
+      uint16_t phase = tomHCReadPhase;
+
+      if (limit == 0)
+         limit = 1;
+
+      tomHCReadPhase++;
+      if (tomHCReadPhase >= limit)
+         tomHCReadPhase = 0;
+
+      return (hc & 0x0400) | (phase & 0x03FF);
+   }
+   else if ((offset >= GPU_CONTROL_RAM_BASE) && (offset < GPU_CONTROL_RAM_BASE + 0x20))
+      return GPUReadWord(offset, who);
+   else if ((offset >= GPU_WORK_RAM_BASE) && (offset < GPU_WORK_RAM_BASE + 0x1000))
+      return GPUReadWord(offset, who);
+   else if ((offset >= 0xF02200) && (offset < 0xF022A0))
+      return BlitterReadWord(offset, who);
+   else if (offset == 0xF00050)
+      return TOMReadPIT(0);
+   else if (offset == 0xF00052)
+      return TOMReadPIT(1);
+
+   return (TOMReadByte(offset, who) << 8) | TOMReadByte(offset + 1, who);
+}
+
+
+#define TOM_STRICT_MEMORY_ACCESS
+// TOM byte access (write)
+void TOMWriteByte(uint32_t offset, uint8_t data, uint32_t who)
+{
+   //???Is this needed???
+   // Perhaps on the writes--32-bit writes that is! And masked with FF7FFF...
+#ifndef TOM_STRICT_MEMORY_ACCESS
+   offset &= 0xFF3FFF;
+#else
+   // "Fast" (32-bit only) write access to the GPU
+   //	if ((offset >= 0xF0A100) && (offset <= 0xF0BFFF))
+   if ((offset >= 0xF08000) && (offset <= 0xF0BFFF))
+      offset &= 0xFF7FFF;
+#endif
+
+#ifdef TOM_STRICT_MEMORY_ACCESS
+   // Sanity check ("Aww, there ain't no Sanity Clause...")
+   if ((offset < 0xF00000) || (offset > 0xF03FFF))
+      return;
+#endif
+
+   if ((offset >= GPU_CONTROL_RAM_BASE) && (offset < GPU_CONTROL_RAM_BASE+0x20))
+   {
+      GPUWriteByte(offset, data, who);
+      return;
+   }
+   else if ((offset >= GPU_WORK_RAM_BASE) && (offset < GPU_WORK_RAM_BASE+0x1000))
+   {
+      GPUWriteByte(offset, data, who);
+      return;
+   }
+   else if ((offset >= 0xF02200) && (offset < 0xF022A0))
+   {
+      BlitterWriteByte(offset, data, who);
+      return;
+   }
+   else if (offset == 0xF00050)
+   {
+      tomTimerPrescaler = (tomTimerPrescaler & 0x00FF) | (data << 8);
+      TOMResetPIT();
+      return;
+   }
+   else if (offset == 0xF00051)
+   {
+      tomTimerPrescaler = (tomTimerPrescaler & 0xFF00) | data;
+      TOMResetPIT();
+      return;
+   }
+   else if (offset == 0xF00052)
+   {
+      tomTimerDivider = (tomTimerDivider & 0x00FF) | (data << 8);
+      TOMResetPIT();
+      return;
+   }
+   else if (offset == 0xF00053)
+   {
+      tomTimerDivider = (tomTimerDivider & 0xFF00) | data;
+      TOMResetPIT();
+      return;
+   }
+   else if (offset >= 0xF00400 && offset <= 0xF007FF)	// CLUT (A & B)
+   {
+      // Writing to one CLUT writes to the other
+      offset &= 0x5FF;		// Mask out $F00600 (restrict to $F00400-5FF)
+      tomRam8[offset] = data, tomRam8[offset + 0x200] = data;
+   }
+
+   offset &= 0x3FFF;
+   /* Any write to OBF releases an OP halted on a GPU object (see
+    * OPProcessList OBJECT_TYPE_GPU). */
+   if (offset == OBF || offset == OBF + 1)
+      OPNotifyOBFWrite();
+   if (offset == INT1)
+      TOMClearPendingIRQs(data);
+   if (offset == INT1 + 1)
+   {
+      /* CDDA-DIAG: INT1 bit 4 (C_JERENA) is the TOM-side gate for
+       * JERRY -> 68K delivery (BUTCH CD IRQs route through it, see
+       * cdrom.c BUTCHExec). Edges are rare; log unconditionally. */
+      static uint8_t tomPrevInt1Ena = 0;
+      if ((tomPrevInt1Ena ^ data) & 0x10)
+         LOG_DBG("[CDDA] INT1 C_JERENA %s (INT1=$%02X who=%u 68kpc=$%06X)\n",
+                 (data & 0x10) ? "ON" : "OFF", data, who,
+                 m68k_get_reg(NULL, M68K_REG_PC));
+      tomPrevInt1Ena = data;
+   }
+   if (offset == INT1 + 1)
+   {
+      /* TOM's 68K request line is raised by an interrupt *event* and
+       * dropped when the 68K acknowledges (see irq_ack_handler); a write
+       * to INT1 does not re-present a request the CPU already took.  The
+       * one case a register write does create a request is a source that
+       * is pending and becomes *newly* enabled.
+       *
+       * Re-asserting on every INT1 write is what made NBA Jam TE storm
+       * once requests survived the CPU's interrupt mask (see #187): its
+       * level-2 handler leaves the TOM PIT pending bit latched and
+       * rewrites INT1 = $0009 on each entry, so an unconditional
+       * re-assert re-entered the handler forever. */
+      uint8_t newlyEnabled = (uint8_t)(data & ~tomRam8[INT1 + 1]);
+
+      tomRam8[offset] = data;
+
+      if (newlyEnabled & TOMPendingMask())
+         m68k_set_irq(2);
+      return;
+   }
+   tomRam8[offset] = data;
+
+   /* MEMCON1 can be written a byte at a time; keep the bus arbiter's
+    * MEMCON1-derived DRAM/ROM timing in sync (word writes hook in
+    * TOMWriteWord). */
+   if (offset == MEMCON1 || offset == MEMCON1 + 1)
+      bus_arbiter_update_memcon(TOMGetMEMCON1());
+   if (offset == MEMCON2 || offset == MEMCON2 + 1)
+      bus_arbiter_update_memcon2(TOMGetMEMCON2());
+}
+
+// TOM word access (write)
+void TOMWriteWord(uint32_t offset, uint16_t data, uint32_t who)
+{
+   //???Is this needed??? Yes, but we need to be more vigilant than this.
+#ifndef TOM_STRICT_MEMORY_ACCESS
+   offset &= 0xFF3FFF;
+#else
+   // "Fast" (32-bit only) write access to the GPU
+   //	if ((offset >= 0xF0A100) && (offset <= 0xF0BFFF))
+   if ((offset >= 0xF08000) && (offset <= 0xF0BFFF))
+      offset &= 0xFF7FFF;
+#endif
+
+#ifdef TOM_STRICT_MEMORY_ACCESS
+   // Sanity check
+   if ((offset < 0xF00000) || (offset > 0xF03FFF))
+      return;
+#endif
+
+   if ((offset >= GPU_CONTROL_RAM_BASE) && (offset < GPU_CONTROL_RAM_BASE+0x20))
+   {
+      GPUWriteWord(offset, data, who);
+      return;
+   }
+   else if ((offset >= GPU_WORK_RAM_BASE) && (offset < GPU_WORK_RAM_BASE+0x1000))
+   {
+      GPUWriteWord(offset, data, who);
+      return;
+   }
+   else if (offset == 0xF00050)
+   {
+      tomTimerPrescaler = data;
+      TOMResetPIT();
+      return;
+   }
+   else if (offset == 0xF00052)
+   {
+      tomTimerDivider = data;
+      TOMResetPIT();
+      return;
+   }
+   else if (offset == 0xF000E0)
+   {
+      //Check this out...
+      TOMClearPendingIRQs(data >> 8);
+   }
+   else if ((offset >= 0xF02200) && (offset <= 0xF0229F))
+   {
+      BlitterWriteWord(offset, data, who);
+      return;
+   }
+   else if (offset >= 0xF00400 && offset <= 0xF007FE)	// CLUT (A & B)
+   {
+      // Writing to one CLUT writes to the other
+      offset &= 0x5FF;		// Mask out $F00600 (restrict to $F00400-5FF)
+      // Watch out for unaligned writes here! (Not fixed yet)
+//#warning "!!! Watch out for unaligned writes here !!! FIX !!!"
+      SET16(tomRam8, offset, data);
+      SET16(tomRam8, offset + 0x200, data);
+   }
+
+   offset &= 0x3FFF;
+   if (offset >= 0x30 && offset <= 0x4E)
+      data &= 0x07FF;			// These are (mostly) 11-bit registers
+   if (offset == 0x2E || offset == 0x36 || offset == 0x54)
+      data &= 0x03FF;			// These are all 10-bit registers
+
+   // Fix a lockup bug... :-P
+   TOMWriteByte(0xF00000 | offset, data >> 8, who);
+   TOMWriteByte(0xF00000 | (offset+1), data & 0xFF, who);
+
+   if (offset == MEMCON1)
+      bus_arbiter_update_memcon(data);
+   if (offset == MEMCON2)
+      bus_arbiter_update_memcon2(data);
+
+   // detect screen resolution changes
+   //This may go away in the future, if we do the virtualized screen thing...
+   //This may go away soon!
+   // TOM Shouldn't be mucking around with this, it's up to the host system to properly
+   // handle this kind of crap.
+   // NOTE: This is needed somehow, need to get rid of the dependency on this crap.
+//#warning "!!! Need to get rid of this dependency !!!"
+   if ((offset >= 0x28) && (offset <= 0x4F))
+   {
+      uint32_t width = TOMGetVideoModeWidth(), height = TOMGetVideoModeHeight();
+
+      if (width > 1024)
+         width = 1024;
+      if (height > 512)
+         height = 512;
+
+      if ((width != tomWidth) || (height != tomHeight))
+      {
+         tomWidth = width, tomHeight = height;
+      }
+   }
+}
+
+
+int TOMIRQEnabled(int irq)
+{
+   // This is the correct byte in big endian... D'oh!
+   //	return jaguar_byte_read(0xF000E1) & (1 << irq);
+   return tomRam8[INT1 + 1] & (1 << irq);
+}
+
+
+uint16_t TOMIRQControlReg(void)
+{
+   uint16_t val = 0;
+   if (tom_video_int_pending)  val |= 0x0001;
+   if (tom_gpu_int_pending)    val |= 0x0002;
+   if (tom_object_int_pending) val |= 0x0004;
+   if (tom_timer_int_pending)  val |= 0x0008;
+   if (tom_jerry_int_pending)  val |= 0x0010;
+   return val;
+}
+
+
+void TOMSetIRQLatch(int irq, int enabled)
+{
+   switch (irq)
+   {
+      case IRQ_VIDEO:  tom_video_int_pending  = (enabled ? 1 : 0); break;
+      case IRQ_GPU:    tom_gpu_int_pending    = (enabled ? 1 : 0); break;
+      case IRQ_OPFLAG: tom_object_int_pending = (enabled ? 1 : 0); break;
+      case IRQ_TIMER:  tom_timer_int_pending  = (enabled ? 1 : 0); break;
+      case IRQ_DSP:    tom_jerry_int_pending  = (enabled ? 1 : 0); break;
+   }
+}
+
+
+/*
+ * PIT clock rate: full system clock (26.59 MHz NTSC / 26.5939 MHz PAL).
+ * Per JTRM Software Reference and docs/jtrm-clocks-timing.md, PIT counters
+ * decrement at the full processor clock rate.  Historically a "half rate"
+ * (13.3 MHz) implementation has been tried and broke Doom/Rayman music
+ * timing.  See also JERRYResetPIT1/2 in jerry.c (also at full rate).
+ */
+
+/* TOM Programmable Interrupt Timer handler */
+/* NOTE: TOM's PIT is only enabled if the prescaler is != 0 */
+/*       The PIT only generates an interrupt when it counts down to zero, not when loaded! */
+
+void TOMPITCallback(void);
+
+
+void TOMResetPIT(void)
+{
+#ifndef NEW_TIMER_SYSTEM
+   /* Add the next period to the counter; +1 is specified by the JTRM. */
+   /* There is a small problem with this approach: If both the prescaler and the divider are
+      equal to $FFFF then the counter won't be large enough to handle it. !!! FIX !!! */
+   if (tom_timer_prescaler)
+      tom_timer_counter += (1 + tom_timer_prescaler) * (1 + tom_timer_divider);
+#else
+   /* Need to remove previous timer from the queue, if it exists... */
+   RemoveCallback(TOMPITCallback);
+
+   if (tomTimerPrescaler)
+   {
+      /* See PIT clock rate note above. */
+      double usecs = (double)(tomTimerPrescaler + 1) * (double)(tomTimerDivider + 1)
+         * (vjs.hardwareTypeNTSC ? RISC_CYCLE_IN_USEC : RISC_CYCLE_PAL_IN_USEC);
+      SetCallbackTime(TOMPITCallback, usecs, EVENT_MAIN);
+   }
+#endif
+}
+
+// TOM Programmable Interrupt Timer handler
+// NOTE: TOM's PIT is only enabled if the prescaler is != 0
+//
+//NOTE: This is only used by the old execution code... Safe to remove
+//      once the timer system is stable.
+void TOMExecPIT(uint32_t cycles)
+{
+   if (tomTimerPrescaler)
+   {
+      tomTimerCounter -= cycles;
+
+      if (tomTimerCounter <= 0)
+      {
+         TOMSetPendingTimerInt();
+         GPUSetIRQLine(GPUIRQ_TIMER, ASSERT_LINE);	// GPUSetIRQLine does the 'IRQ enabled' checking
+
+         if (TOMIRQEnabled(IRQ_TIMER))
+         {
+            PERF_INC(timing_gpu_irqs_to_68k);
+            m68k_set_irq(2);				// Cause a 68000 IPL 2...
+         }
+
+         TOMResetPIT();
+      }
+   }
+}
+
+void TOMPITCallback(void)
+{
+   TOMSetPendingTimerInt();                  // Set TOM PIT interrupt pending
+   GPUSetIRQLine(GPUIRQ_TIMER, ASSERT_LINE); // It does the 'IRQ enabled' checking
+
+   if (TOMIRQEnabled(IRQ_TIMER))
+   {
+      PERF_INC(timing_gpu_irqs_to_68k);
+      m68k_set_irq(2); // Generate a 68K IPL 2...
+   }
+
+   TOMResetPIT();
+}
+
+#include "state.h"
+
+size_t TOMStateSave(uint8_t *buf)
+{
+	uint8_t *start = buf;
+
+	STATE_SAVE_VAR(buf, tomTimerPrescaler);
+	STATE_SAVE_VAR(buf, tomTimerDivider);
+	STATE_SAVE_VAR(buf, tomTimerCounter);
+	STATE_SAVE_VAR(buf, tom_jerry_int_pending);
+	STATE_SAVE_VAR(buf, tom_timer_int_pending);
+	STATE_SAVE_VAR(buf, tom_object_int_pending);
+	STATE_SAVE_VAR(buf, tom_gpu_int_pending);
+	STATE_SAVE_VAR(buf, tom_video_int_pending);
+	STATE_SAVE_VAR(buf, tomWidth);
+	STATE_SAVE_VAR(buf, tomHeight);
+
+	return (size_t)(buf - start);
+}
+
+size_t TOMStateLoad(const uint8_t *buf)
+{
+	const uint8_t *start = buf;
+
+	STATE_LOAD_VAR(buf, tomTimerPrescaler);
+	STATE_LOAD_VAR(buf, tomTimerDivider);
+	STATE_LOAD_VAR(buf, tomTimerCounter);
+	STATE_LOAD_VAR(buf, tom_jerry_int_pending);
+	STATE_LOAD_VAR(buf, tom_timer_int_pending);
+	STATE_LOAD_VAR(buf, tom_object_int_pending);
+	STATE_LOAD_VAR(buf, tom_gpu_int_pending);
+	STATE_LOAD_VAR(buf, tom_video_int_pending);
+	STATE_LOAD_VAR(buf, tomWidth);
+	STATE_LOAD_VAR(buf, tomHeight);
+	tomHCReadPhase = GET16(tomRam8, HC) & 0x03FF;
+
+	return (size_t)(buf - start);
+}

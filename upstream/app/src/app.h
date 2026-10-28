@@ -1,0 +1,554 @@
+// The application object: owns the window, GL context, ImGui, the libretro
+// host and the audio/video/input services, and runs the main loop.  The same
+// object runs headless (no window, no GL, no ImGui) for the smoke tests.
+#pragma once
+
+#include <SDL3/SDL.h>
+
+#include <cstdint>
+#include <atomic>
+#include <deque>
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "achievements.h"
+#include "audio.h"
+#include "bios.h"
+#include "cheats.h"
+#include "config.h"
+#include "core_host.h"
+#include "debug/debug_session.h"
+#include "desktop_nav_app.h"
+#include "fonts.h"
+#include "fullscreen_menu.h"
+#include "discord_presence.h"
+#ifdef VJ_HAVE_NEURO
+#include "neuro/neuro_agent.h"
+#endif
+#include "emu_thread.h"
+#include "frame_exchange.h"
+#include "input_snapshot.h"
+#include "input.h"
+#include "instance.h"
+#include "late_latch.h"
+#include "library_service.h"
+#include "netplay.h"
+#include "pacing.h"
+#include "paths.h"
+#include "perf.h"
+#include "perf_trace.h"
+#include "platform/commands.h"
+#include "theme_custom.h"
+#include "tv/tv_mode.h"
+#include "video.h"
+
+struct ImDrawList;   // (imgui.h)
+
+namespace vj {
+
+namespace tv {
+class AppHost;
+class Shell;
+}  // namespace tv
+
+struct CliArgs {
+    std::vector<std::string> content;
+    std::string dataDir;
+    std::vector<std::pair<std::string, std::string>> options;
+    bool headless = false;
+    bool fullscreen = false;
+    bool noContent = false;         // boot the console with no cartridge: the CD BIOS (or --boot-bios)
+    std::string bootBios;           // --boot-bios cart|cd: which BIOS a no-content boot enters ("" = cd)
+    std::string cartBios, cdBios;   // --cart-bios / --cd-bios FILE: use this BIOS file for this run (not saved)
+    std::vector<std::string> expectBios;   // headless: "cart:builtin|system|file" / "cd:..." must be what the core staged
+    bool verbose = false;
+    std::string screenshot;         // dev: save the window's pixels to this PNG after --screenshot-frame frames, then exit
+    unsigned screenshotFrame = 120;
+    std::string showWindow;         // dev: open a window at start: settings[-video|-input|-audio|-storage|-interface][:FILTER], states, about, cheats, library, login, achievements, keypad
+    std::string theme;              // --theme system|dark|light: the colour theme for this run (not saved); "" = the saved choice
+    float uiScale = 0;              // dev: force the UI scale (0 = the display's); stands in for a HiDPI display
+    std::string font, fontThen;     // dev: --font SPEC (override ui.font.* for this run), --font-then SPEC (switch to it live after 60 frames)
+    unsigned pixelDensity = 0;      // dev: --pixel-density N: lay out in points but render N pixels per point (a Retina display on a 1x or offscreen window), for screenshots
+    bool lowDpi = false;            // dev: no high-pixel-density window (a 1x framebuffer even on a Retina Mac): screenshots of a 1x display
+#ifdef VJ_HAVE_NEURO
+    std::string neuroUrl;           // --neuro URL: connect to this Neuro API server for this run (not saved)
+#endif
+    bool stateRoundtrip = false;    // headless: save a state, run on, load it, run on again; both runs must hash alike
+    std::string discSwap;           // headless: add this CD image to the loaded disc's list, swap to it and back (File > Disc)
+    std::string discInsert;         // headless: put this CD image in the empty tray of a no-content CD BIOS boot (#646)
+    unsigned expectDiscs = 0;       // headless: the disc list must hold N images (an .m3u's discs); the last is then inserted
+    bool allowBlank = false;        // headless: a blank final frame is not a failure (synthetic discs)
+    unsigned frames = 300;          // headless frames per content
+    std::string expectHash;         // headless: expected hash of the FIRST content
+    std::string dumpFrame;          // headless: write the final frame of each game as PNG (<path>.N.png)
+    // cheats (#835): the command-line twins of the Cheats window, used by the headless tests
+    std::string cheatsDir;                    // extra folder of .cht files
+    std::string cheatSet;                     // select this cheat set (file stem) for the game
+    std::vector<std::string> cheatOn;         // turn on these database cheats (description, id or position)
+    std::vector<std::string> cheatCodes;      // add these manual codes
+    std::vector<std::pair<uint32_t, uint8_t>> expectRam;   // headless: main-RAM bytes that must hold at the end
+    bool dumpNativeMenu = false;    // dev: print and check the real macOS menu tree, then exit (77 = no native menu here)
+    bool printControls = false;     // headless: print Player 1's controls cheat sheet (devices_ui.h)
+    int expectControls = -1;        // headless: 1 = the controls overlay must be showing after load, 0 = hidden
+    bool tv = false;                // --tv: start with TV mode on (a no-op when the setting is Off; not remembered)
+    std::string tvTestScript;       // replay this script of key / pad / focus events against the TV menu (tv_script.cpp); headless it replaces the run, windowed it runs between frames
+    bool showHelp = false;
+    bool showVersion = false;
+    unsigned perfFrames = 0;        // dev: profile this many UI frames (after a warm-up), print the phase costs, exit
+    bool perfGpu = false;           // dev: glFinish around the shader chain / UI so the numbers include GPU time
+    unsigned perfShaderW = 0, perfShaderH = 0;   // dev: run the shader chain at this output size (4K cost on a 1080p display)
+    bool perfNoReuse = false;       // dev: disable the shader output reuse (before/after comparison)
+    bool perfPause = false;         // dev: pause after loading (idle-cost profile)
+    int emuThread = -1;             // --emu-thread on|off: the emulation on its own thread for this run (-1 = the setting; headless: off)
+    bool perfInput = false;         // dev: with --perf-frames, inject a key event every 30 iterations (input-latency column)
+    int lateLatch = -1;             // dev: --late-latch on|off, threaded + vsync only (default on; #967 measurement)
+    int paceSteer = -1;             // dev: --pace-steer on|off, threaded + vsync only (default on; #967 evenness)
+    int emuWake = -1;               // dev: --emu-wake precise|plain, the emulation thread's wake-ups (default precise)
+    // RetroAchievements (#836): the headless test hooks.  There is no way to sign in
+    // headless; the only server is the canned-JSON mock, so a test can never reach
+    // (or authenticate against) the real service.
+    std::string raMock;                              // directory of <api>.json canned replies
+    bool raHardcore = false;                         // run the mock session in hardcore
+    std::vector<std::pair<unsigned, std::string>> raPokes;   // FRAME:CODE -> core cheat switched on at FRAME
+    std::vector<unsigned> raExpectUnlock;            // achievement ids that must fire
+    std::vector<unsigned> raExpectNoUnlock;          // ... and ids that must not
+    std::vector<std::string> raExpectRequests;       // API names ("awardachievement") that must have been sent
+    std::string raExpectHash;                        // the game hash the client must have asked about
+    bool raExpectLoadError = false;                  // the game must NOT be identified
+    bool raExpectHardcore = false;                   // hardcore active + state load refused
+    bool raExpectSoftcore = false;                   // softcore: save + load state work, progress sidecar written
+    unsigned raLoginAt = 0;                          // delay the mock sign-in to this frame (a late sign-in)
+    std::vector<std::pair<unsigned, std::string>> raSteps;   // FRAME:ACTION (hardcore:on|off, signout, poke:A=V, expect:A=V)
+    std::vector<std::string> raExpectNotice;         // a player-facing notice containing this text must have been shown
+    int raExpectReset = -1;                          // exact number of clean-start restarts (-1 = don't check)
+    bool raExpectBlocked = false;                    // hardcore wanted, but a disallowed core option must keep it off
+    NetplayCli netplay;                              // --netplay*: the command-line twin of the Netplay window
+};
+
+struct Osd {
+    std::string text;
+    double born = 0;
+    double life = 3;
+    int level = 1;
+};
+
+struct SlotThumb {
+    unsigned tex = 0;
+    int w = 0, h = 0;
+    SDL_Time mtime = 0;
+};
+
+class App {
+public:
+    App();
+    ~App();
+    int run(const CliArgs& args);   // returns the process exit code
+
+    // ---- services (public: the UI drives them) -------------------------------
+    Paths paths;
+    Config cfg;
+    CoreHost& host;
+    AudioOut audio;
+    VideoOut video;
+    InputManager input;
+    // Which Jaguar ports hold the Pro Controller (applyPortDevices, UI thread); host.optionLock turns it into
+    // virtualjaguar_pN_device = pad_pro (devices.h lockedCoreOptionFor) on the emulation thread: atomic.
+    std::array<std::atomic<bool>, 2> proPorts{{false, false}};
+    LibraryService library;   // optional game library (#838); idle until start()ed
+    Achievements ach;   // RetroAchievements (#836)
+    Perf perf;          // dev: --perf-frames
+    Netplay netplay{host};   // link-cable play over the network
+    DebugSession debug;      // the core's debug interface: Tools menu, halt pump, breakpoints (debug/debug_session.h)
+    // ---- the emulation thread (#967; docs/app-emulation-thread-design.md) ------------------------------------
+    EmuThread emu;              // inline (no thread) unless this run turned it on (emuThreadThisRun)
+    FrameExchange frames;       // finished frames, emulation thread -> UI thread
+    InputSnapshot inputSnap;    // the newest input, UI thread -> the core's poll
+    bool threaded() const { return emu.threaded(); }
+    // The aspect to draw the picture with: the frame on screen's own when threaded (a frame and its aspect travel
+    // together through FrameExchange), the core's current one inline.
+    float pictureAspect() const { return threaded() ? shownAspect_ : host.aspect(); }
+    // The core is parked at a debugger breakpoint (it then runs the UI from inside retro_run; inline mode only).  This
+    // is what every "may the UI re-enter the core?" check asks: CoreHost::inFrame() is the core's own view, and when
+    // threaded it is true for the whole of every frame.
+    bool haltedNow() const { return debug.halted(); }
+    discord::Presence discordPresence;   // Discord Rich Presence (discord_app.cpp); idle without an application ID
+    struct DiscordState {        // what discordTick() remembers between calls
+        double lastTick = -1;
+        long long appStartUnix = 0, gameStartUnix = 0;
+        std::string artKey, artUrl;
+        double artAt = 0;
+    } discordState;
+#ifdef VJ_HAVE_NEURO
+    neuro::Agent neuro;              // the Neuro API client (neuro/neuro_app.cpp): an AI plays as Player 1
+    std::string neuroCliUrl;         // --neuro URL: on for this run, whatever the config says
+    neuro::AgentSettings neuroCfg;   // the config as of neuroCfgAt (re-read 4 times a second, not every UI frame)
+    double neuroCfgAt = -1e9;
+#endif
+
+    // ---- state ----------------------------------------------------------------
+    bool paused = false;
+    bool fastForward = false;
+    bool quit = false;
+    bool fullscreen = false;
+    bool menuPinned = true;
+    bool fullscreenAutoHideMenu = false;   // ui.fullscreen_autohide_menu; preserves existing behavior by default
+    ui::FullscreenMenu fullscreenMenu;
+    bool menuBarDrawn = false;             // actual visibility this frame, for toast placement
+    bool showInWindowMenu = false;    // macOS: also show the in-window menu bar under the native one (ui.menubar_in_window; F1 toggles)
+    bool inWindowMenuBar() const;     // is an ImGui menu bar being drawn at all
+    bool showSettings = false;
+    bool showStates = false;
+    bool showAbout = false;
+    bool showCheats = false;
+    fonts::Settings fontSettings;     // Settings > Interface > Font (ui.font.*); applied live through fonts_imgui.h
+    bool homeLibrary = true;          // no game loaded: the game library is the home screen (ui.home_library)
+    bool showNetplay = false;
+    CheatManager cheats;
+    std::string devSelectTab;         // dev: --show-window settings-video etc. opens Settings on that tab ("Video", "Input", ...)
+    float uiScaleOverride = 0;        // dev: --ui-scale
+    unsigned simDensity_ = 0;         // dev: --pixel-density (0 / 1 = off)
+    void simulateDensity();
+    void logDensity();
+    bool densityLogged_ = false;
+    unsigned densityFrames_ = 0;
+    bool lowDpi_ = false;             // dev: --low-dpi
+    int stateSlot = 0;
+    int resumeMode = 1;               // lib::ResumeMode: Off / Ask / Always, "Resume where I left off" (saves.resume)
+    struct ResumeOffer {              // "Resume from <time>?" asked after a game booted (resumeMode == Ask)
+        bool active = false;
+        SDL_Time savedAt = 0;
+        std::string game;
+    } resumeOffer;
+    void answerResume(bool resume, bool always);   // the prompt's buttons
+    char optionFilter[64] = "";   // core-options search box
+    std::vector<std::string> recents;
+
+    // Video settings (persisted)
+    PresentOptions present;
+    bool vsync = true;
+    float volume = 1.0f;
+    bool mute = false;
+    float audioTargetMs = 64.0f;
+    bool showFps = false;
+    float uiScale_ = 1.0f;            // the scale the style was set up at (the display's content scale times ui.scale)
+    std::string themeBeforePreview_;  // the choice to keep/restore while the theme editor previews an unsaved theme
+    bool themePreviewing_ = false;
+    bool tvFromCli_ = false;          // --tv was given: this run's TV state is not remembered (ui.tv_manual_on)
+    bool themeFromCli_ = false;       // --theme was given: this run's choice is not read from / written to config.ini (ui.theme)
+    bool autosaveSram = true;
+    bool trayIcon = false;     // ui.tray: a tray / menu-bar icon (Settings > Interface)
+    bool windowsOutside = false;   // ui.viewports: Settings / tool windows may become their own OS windows (viewports.h)
+    bool keepAwake = true;     // ui.keep_awake: no screensaver / display sleep while a game runs
+    // Settings > Interface > Emulation thread (ui.emu_thread, #967): -1 = never chosen, 0 off, 1 on.  Never chosen is
+    // off in Phase 1 on every build; Phase 3 turns it on by default in nightlies.
+    int emuThreadPref = -1;
+    bool emuThreadWanted() const;                                 // the choice (never chosen = off)
+    bool emuThreadThisRun() const { return emuThreadThisRun_; }   // decided once at start-up
+
+    // ---- actions ----------------------------------------------------------------
+    bool openContent(const std::string& path);
+    bool autoSave();                  // write this game's auto-save when the policy allows (lib::shouldAutoSave)
+    void offerResume();               // a game booted: load / ask / nothing, by the policy and the option
+    void openAndLoadState(const std::string& path, int slot, const std::string& stateDisc = "");   // the library: open `path`, then load its state `slot`
+    bool openNoContent();             // boots the console with no cartridge, through the BIOS bootBios() last chose
+    // Boots a BIOS on its own (BIOS & system tab, File > Boot BIOS): a cartridge boot ROM runs against an empty
+    // slot, the CD BIOS comes up with no disc.  `file` is used for this boot only ("" = the saved choice).
+    bool bootBios(bios::Role role, const std::string& file = std::string());
+    // The saved BIOS choice (config.ini bios.cart / bios.cd); "" = Auto.  Takes effect at the next load.
+    bios::Selection biosChoice;
+    void setBiosChoice(bios::Role role, const std::string& path);
+    bool importBios(const std::string& path, bool trustSize = false);   // copy into <system>/bios/, choose it, rescan
+    bool reloadContent();
+    void closeContent();
+    void showOpenDialog();
+    void showDiscDialog();            // File > Add disc image...: the picked image joins the disc list and goes in
+    bool addDisc(const std::string& path);   // the picked image: appended, then selected (a closed tray swaps at once)
+    void showImportBiosDialog();      // a file picker that imports the BIOS picked (BIOS & boot)
+    bool homeVisible() const { return homeLibrary && !host.isLoaded() && !tvMode.active(); }   // is the desktop library standing in for the game? (TV mode's screens stand in instead)
+    bool desktopWindowOpen() const;   // Settings, States, Cheats, About, the library window, the keypad overlay or any popup / menu is open (devices_ui.cpp)
+    void newWindow();                 // File > New Window (Ctrl/Cmd+N): another copy of the app (instance.h)
+    void toggleLibrary();             // Ctrl/Cmd+L: the library window, or focus the home screen's search box
+    void reset();
+    void togglePause();
+    // The TV in-game menu's pause (tv/tv_app_host.cpp): like togglePause() but silent, and it remembers whether the
+    // game was already paused, so closing the menu gives back exactly that.  False = refused (hardcore rations pausing;
+    // `why` says so).  Under netplay it returns true without pausing: the link keeps running.
+    bool menuPause(std::string& why);
+    void menuResume();
+    tv::Shell& tvShell();
+    tv::TvMode tvMode;                           // TV mode (#991): when it is on
+    DesktopPad deskPad;                          // pad navigation of the desktop library (#1021, desktop_nav_app.h)
+    tv::TvSetting tvSetting = tv::TvSetting::Manual;   // ui.tv_mode as stored; effectiveSetting() is what TvMode acts on
+    void toggleTvMode() { tvMode.toggle(); }     // View > TV Mode, F4 with no game; a no-op when the setting is Off
+    void configureTvMode();                      // tvMode.configure() from tvSetting + the config (also when Settings changes it)
+    void setFullscreen(bool fs);
+    void applyVsync();
+    void syncSwapInterval();
+    void applyTheme();                // the Dear ImGui style for the theme in force (theme.h); a no-op before the UI exists
+    void setThemeChoice(const std::string& key);   // Settings > Interface > Appearance: system | dark | light | custom:<name>; remembered
+    bool applyThemeChoice(const std::string& key); // the same without remembering; false when a custom theme is missing (System is used)
+    void themePreview(const theme::Custom& c);     // the theme editor's live preview: shown, not remembered until saved
+    void themePreviewEnd(bool keep);               // the editor closed (keep: its theme was saved and chosen); otherwise the previous choice returns
+    theme::Store themeStore() const;               // <data>/themes/, read-only in a secondary copy (#902)
+    bool showThemeEditor = false;
+    void applyAudioSettings();
+
+    std::string statePath(int slot) const;
+    std::string thumbPath(int slot) const;
+    bool saveState(int slot, bool quiet = false);   // slot lib::kAutoSlot = the auto-save
+    bool loadState(int slot);
+    bool slotExists(int slot) const;
+    SDL_Time slotTime(int slot) const;
+    const SlotThumb* slotThumb(int slot);   // lazily loaded GL texture, or null
+    void invalidateThumbs();
+
+    void toast(const std::string& text, double seconds = 3.0, int level = 1);
+    void addRecent(const std::string& path);
+    void saveConfig();
+    void applySettingsFromConfig();   // re-read the member settings from cfg (defaults for erased keys); Settings > Reset
+    void applyBios();                 // hands the BIOS choice (and a one-off boot's file) to the core host
+
+    // ---- native-OS integration (desktop.cpp; platform/platform.h) -------------------------
+    void runNativeCommand(platform::Cmd cmd, int arg);   // a native menu / tray click, from the event loop
+    void presentViewports();                             // draws + presents the extra OS windows (after the main draw data)
+    bool fromExtraWindow(const SDL_Event& e) const;
+    void applyViewports();                               // ImGui multi-viewport mode to match windowsOutside + the situation (per frame)
+    bool viewportsActive() const { return viewportsOn_; }
+    const char* viewportsNote() const;                   // why windowsOutside is ignored right now ("" = not)
+    bool applyTray();                                    // makes the tray match trayIcon; false = not available here
+
+    double now() const;
+    SDL_Window* window() const { return window_; }
+    float fpsMeasured() const { return fpsShown_; }
+    std::vector<Osd>& osd() { return osd_; }
+
+private:
+    bool initSdl(const CliArgs& a);
+    bool initWindow();
+    bool initImGui();
+    void shutdown();
+    void loadConfig();
+    void wireHost();
+    void limitFeaturesForEmuThread();   // #967: the debugger tools and the GDB stub are off while the thread is on
+    void liftFeatureLimits();           // undoes it when the thread did not start (nothing is loaded yet)
+
+    int runInteractive(const CliArgs& a);
+    int runHeadless(const CliArgs& a);
+    // tv_script.cpp: --tv-test-script.  Headless it is the whole run (runTvScript); windowed, runInteractive steps it between frames.
+    int runTvScript(const CliArgs& a);
+    struct TvScriptRun;
+    std::shared_ptr<TvScriptRun> tvScript_;
+    bool tvScriptBegin(const CliArgs& a, bool windowed);
+    int tvScriptStep();
+    void tvScriptDrain();
+    void tvScriptEnd();
+    void tvScriptFrameEnd();   // windowed: a pending `shot`, after the UI is drawn
+    void saveWindowScreenshot(const std::string& path);
+
+    void desktopInit();       // after the window exists: native menus, tray, dark title bar
+    void desktopFrame();      // every frame: refresh the native menus from the app state
+    void desktopShutdown();
+    platform::MenuState menuState();
+    void handleEvent(const SDL_Event& e, bool headless);
+    void handleDrop(const std::string& path);
+    void handleHotkey(const SDL_KeyboardEvent& k);
+    void stepEmulation();
+#ifdef VJ_HAVE_NEURO
+    void headlessNeuroFrame(uint64_t t0, unsigned i);
+#endif
+    void threadedFrame();             // UI thread, threaded: input out, frames / counters / messages in
+    void haltedFrame();               // one UI frame WITHOUT stepping the emulation: the debugger's halt pump runs it
+    void syncDebug();                 // content loaded / hardcore -> the debug session
+    void frameUi();
+    void updateTitle();
+    uint32_t frameHash(const Frame& f) const;
+
+    static constexpr int kNoPendingSlot = -1000;
+    int pendingStateSlot_ = kNoPendingSlot;       // openAndLoadState: load this slot after the new game has run a few frames
+    int pendingStateFrames_ = 0;
+    std::atomic<uint64_t> runFrames_{0};   // emulated frames of the loaded game (auto-save needs a few seconds)
+    double runSeconds() const;
+    bool reloading_ = false;          // reloadContent: a restart, not a new game
+    bool suppressResume_ = false;     // the library opened a game to load a chosen state: no auto-save offer
+    bool headless_ = false;
+    bool badOverride_ = false;   // a --option key/value the loaded core does not accept
+    bool sdlUp_ = false;
+    SDL_Window* window_ = nullptr;
+    uint64_t displayPeriodNs();                  // the window's display refresh period, cached; 0 when unknown
+    uint64_t displayPeriodNs_ = 0;
+    bool displayPeriodValid_ = false;            // cleared when the window moves to another display
+    uint64_t nextPresentNs_ = 0;                 // threaded, vsync off: when the next iteration is due (a deadline grid)
+    SDL_GLContext gl_ = nullptr;
+    bool imguiUp_ = false;
+    float dropX_ = 0.0f, dropY_ = 0.0f;   // last SDL_EVENT_DROP_POSITION (window coordinates)
+    uint32_t openDialogEvent_ = 0;
+    bool viewportsOn_ = false;         // ImGuiConfigFlags_ViewportsEnable is set right now
+    uint64_t menuStateTick_ = 0;       // desktopFrame throttle
+    bool inputCaptured_ = false;
+    bool emuThreadThisRun_ = false;   // run(): --emu-thread, else the setting (headless: off unless asked)
+    // VJ_PERF_CSV input latency and underruns (#967 measurement)
+    uint64_t pendingEventNs_ = 0;             // UI thread: SDL timestamp of the oldest input event not yet polled
+    std::atomic<uint64_t> latSumNs_{0}, latCount_{0};   // written where the core polls, read per UI iteration
+    uint64_t underrunsSeen_ = 0;
+    void noteInputLatency(uint64_t eventNs);
+    void perfSample();
+    // VJ_PERF_CSV event -> present (#967: the late latch's measurement).  The swap's return stands in for the photon.
+    uint64_t presentEventNs_ = 0;   // inline: the oldest input event the frames of this iteration polled
+    uint64_t shownSeq_ = 0;         // threaded: the InputSnapshot publish the frame on screen polled
+    std::deque<std::pair<uint64_t, uint64_t>> presentQueue_;   // threaded: (publish seq, oldest event ns), oldest first
+    uint64_t presSumNs_ = 0, presCount_ = 0;
+    uint64_t emuInputSeq_ = 0;      // emulation thread: the publish the last core poll took
+    unsigned perfInputK_ = 0;       // --perf-input: the next injected key's delay step
+    void publishInput();
+    void notePresented(uint64_t swapEndNs);
+    // The late latch (#967, late_latch.h): threaded + vsync, wait until shortly before the next vblank, handing input
+    // to the emulation thread as it arrives, then take the newest frame.
+    LateLatch latch_;
+    bool lateLatchOn_ = true;
+    // PacingClock's steering (#967 evenness): the UI publishes where it takes frames; the emulation thread keeps frame
+    // ends off those take points.  Period 0 = no take grid (vsync off, swaps not on a tracked vblank grid, steering off).
+    bool paceSteerOn_ = true;
+    std::atomic<uint64_t> takeNs_{0}, takePeriodNs_{0};
+    void publishTakeGrid(uint64_t takeNs);
+    uint64_t latchedAtNs_ = 0;   // when this iteration's wait ended: its UI work starts there
+    unsigned latchChecks_ = 0;
+    bool latchLogged_ = false;
+    void latchWait();
+    void presentNap();
+    void latchLog();
+    void latchUpdatePeriod();
+    bool menuHeldPause_ = false;      // menuPause() took the game's pause (menuResume gives it back)
+    bool pausedBeforeMenu_ = false;   // ... and the game was already paused by the user
+    std::unique_ptr<tv::AppHost> tvHost_;   // the TV module's view of this App
+    std::unique_ptr<tv::Shell> tvShell_;
+
+    // pacing
+    double lastTick_ = 0;
+    Pacer pacer_;
+    uint64_t perfFreq_ = 1;
+
+    // the emulation thread (#967)
+    struct EmuClient;                          // EmuThread::Client -> App (app.cpp)
+    std::unique_ptr<EmuClient> emuClient_;
+    void startEmuThread();                     // after the window and the audio device; stays inline if it cannot
+    void busyFrame(double waited, unsigned tick);   // EmuThread::call's wait hook (>= 250 ms): the spinner frame
+    void stopEmuThread();                      // exits the process if the thread is stuck in the core
+    void emuRunOneFrame();                     // emulation thread: one frame, then publish it
+    double emuAudioQueuedMs() const;           // mode A's audio clock, or -1 for none
+    void syncEmuFlags();                       // UI thread: pause / fast-forward / mute / audio target -> emulation side
+    const Frame& shownFrame();                 // the newest finished frame (FrameExchange when threaded)
+    void runHeadlessFrames(unsigned n);
+    bool discSwapHeadlessCheck(const std::string& path);   // --disc-swap
+    bool discInsertHeadlessCheck(const std::string& path);   // --disc-insert
+    void followDiscSwap();                     // UI thread: a disc swap moved host.contentPath(); catch up with it
+    unsigned seenDiscSwaps_ = 0;               // host.discSwaps() the app has caught up with
+    bool discListHeadlessCheck(unsigned want);             // --expect-discs
+    bool openContentOnCore(const std::string& path, std::string& err, std::vector<std::string>& overrideErrors);
+    bool openNoContentOnCore(std::string& err);
+    std::atomic<bool> emuFastForward_{false}, emuMute_{false};   // the UI's fastForward / mute, for the emulation side
+    std::atomic<uint64_t> retroTicks_{0};      // performance-counter ticks inside retro_run, since the UI last read them
+    CoreInput emuInput_;                       // emulation thread: what the core reads this frame
+    uint64_t lastSentSerial_ = 0;              // emulation thread: the last frame handed to FrameExchange
+    // VJ_PERF_TRACE (perf_trace.h, #967 evenness)
+    PerfTrace trace_;
+    PerfTrace::Emu tracePaced_{};              // emulation thread: the pacing of the frame about to run
+    bool tracePacedSet_ = false;
+    uint64_t traceWakeNs_ = 0, traceTargetNs_ = 0;   // UI thread: the late latch's last wait (0 = none)
+    unsigned traceWaitEvents_ = 0;                    // ... the input events it handled
+    uint64_t traceWaitOverNs_ = 0;                    // ... its largest overshoot of one blocking call
+    unsigned char traceWaitOverBy_ = 0;               // ... and which call that was (1 wait-event, 2 precise delay)
+    void tracePaced(double lateSec, const PacingClock& clock);
+    void traceUi(uint64_t takeNs, uint64_t serial, uint64_t swap0, uint64_t swap1);
+    uint64_t emuFramesSeen_ = 0;               // UI thread: EmuThread::framesRun() at the previous iteration
+    uint64_t pendingStateAt_ = 0;              // threaded: run the pending state load once framesRun() reaches this
+    uint64_t shownEpoch_ = 0;                  // UI thread: FrameExchange::epoch() the picture on screen belongs to
+    float shownAspect_ = 4.0f / 3.0f;          // UI thread: the aspect of the frame on screen (FrameExchange::Slot::aspect)
+    void adoptFrameEpoch();                    // UI thread: a content switch drops the previous game's picture
+
+    // measured fps
+    double fpsWindowStart_ = 0;
+    uint64_t fpsWindowFrames_ = 0;
+    float fpsShown_ = 0;
+    double lastSramFlush_ = 0;
+    double lastTitle_ = 0;
+
+    std::vector<Osd> osd_;
+    std::map<int, SlotThumb> thumbs_;
+    InstanceLock instanceLock_;       // held for the whole run; the number lives in paths.instance
+    std::string dataDirArg_;          // --data-dir as given (forwarded to a New Window copy)
+    std::string headlessTmp_;
+    unsigned headlessLoads_ = 0;
+    unsigned testSlowCallMs_ = 0;     // VJ_TEST_SLOW_CALL_MS: the load call() sleeps this long (smoke_busy_threaded)
+    std::string biosOnce_[3];         // a one-off BIOS boot's file per role (bootBios): beats everything, until the next load
+    std::string biosCli_[3];          // --cart-bios / --cd-bios: beats the saved choice for the whole run
+    unsigned bootTarget_ = 0;         // what a no-content boot enters (VJ_BOOT_*)
+
+    // headless results, one per loaded content
+    struct HeadlessResult {
+        std::string path;
+        uint32_t hash = 0;
+        unsigned w = 0, h = 0;
+        size_t audioFrames = 0;
+        bool uniform = true;
+        unsigned optVisible = 0, optTotal = 0;
+    };
+    std::vector<HeadlessResult> results_;
+    std::atomic<size_t> audioFramesSeen_{0};
+};
+
+// ImGui frame builder (ui.cpp).
+void drawUi(App& app, bool& wantCaptureKeyboard);
+
+// Cheats (cheats_core.cpp / cheats_ui.cpp).
+void cheatsInit(App& app, const CliArgs& a);        // wire the core sinks, find the library
+void cheatsAfterLoad(App& app);                     // a game was (re)loaded: its cheats go back in
+void cheatsAfterStateLoad(App& app);                // a state was restored
+void cheatsOnClose(App& app);                       // no game any more
+void cheatsSetUserDir(App& app, const std::string& dir);
+bool cheatsHeadlessCheck(App& app, const CliArgs& a);   // --expect-ram and rejected cheat options
+void drawCheats(App& app);
+// Desktop integration settings (desktop.cpp): the tray / menu-bar icon and "keep the display awake".
+void drawDesktopSettings(App& app);
+// Game library home screen (library_ui.cpp): drawn into the area below the menu bar while no game is loaded.
+void drawLibraryHome(App& app, float x, float y, float w, float h);
+// Debug tools (debug/debug_ui.cpp): the Tools menu, the "halted" bar, and every tool window's draw hook.
+void drawToolsMenu(App& app);
+void drawDebugOverlay(App& app, float areaX, float areaY);   // the "halted" bar
+void drawDebugWindows(App& app);                            // every registered provider's and tool's draw hook
+void addDebugTools(App& app);                               // plug every tool window into app.debug (DebugSession::addProvider)
+void shutdownDebugTools();                                  // before the GL context goes: frees the windows' textures
+// Dev (--show-window): opens a Tools window by name -- memory, palette|clut, scanner, objects, blitter, textures,
+// scope -- once the session can use it (retried each frame until then).  False if the name is not a debug tool.
+bool openDebugWindow(DebugSession& session, const std::string& name);
+// Netplay (netplay_ui.cpp): the window, the menu, and the headless/CLI glue.
+bool netplayInit(App& app, const CliArgs& a);               // log tap + --netplay*; false = bad arguments
+int netplayHeadlessCheck(App& app, const CliArgs& a);       // 0 ok, 1 fail, 77 skip (nobody discovered)
+void drawNetplayMenu(App& app);
+void drawNetplay(App& app);
+// Discord Rich Presence (discord_app.cpp).
+void discordTick(App& app);                          // UI loop, every iteration: cheap, rate-limits itself
+void discordNoteGameStarted(App& app);               // a game booted: the "elapsed" timer restarts
+void discordShutdown(App& app);                      // clears the status and stops the worker
+std::string discordConfiguredAppId(const Config& cfg);   // config discord.app_id, else the compile-time default ("" = none)
+#ifdef VJ_HAVE_NEURO
+// Neuro API (neuro/neuro_app.cpp, CMake option VJ_APP_NEURO): let Neuro-sama, or any Neuro API backend, play (docs/neuro.md).
+void neuroInit(App& app, const CliArgs& a);          // config, profiles; connects when enabled
+void neuroTick(App& app);                            // UI loop, every iteration: the socket, the game, the next force
+void neuroShutdown(App& app);                        // closes the connection
+void drawNeuroMarker(App& app, ImDrawList* bg, float areaX, float areaY, float areaW);   // the "AI plays P1" chip, top right of the picture area (background list)
+void drawNeuroTab(App& app);                         // Settings > Neuro
+#endif
+// Themes (theme_ui.cpp): Settings > Interface > Appearance, the theme editor window and its file-dialog mailbox.
+void drawAppearanceSettings(App& app);
+void drawThemeEditor(App& app);
+void themeFrameHook(App& app);
+// BIOS & boot (bios_ui.cpp): the BIOS choice and boot controls, shown in Settings and above the library's BIOS tab.
+void drawBiosPanel(App& app);
+// Controller remapping UI and helpers (remap_ui.cpp).
+void drawControlsTab(App& app);
+void drawKeypadOverlay(App& app);
+
+}  // namespace vj

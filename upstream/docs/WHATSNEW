@@ -1,0 +1,977 @@
+Virtual Jaguar v3.10.0 libretro
+------------------------------
+
+TV mode, controller navigation, optional emulation threading and AI players.
+Full notes: docs/RELEASE_NOTES_v3.10.0.md
+
+Options and v17 savestates carry over. Emulation threading remains
+experimental and OFF by default.
+
+== Core ==
+* GPU/DSP MMULT preserves the live matrix address and wraps within low
+  4 KB local RAM; fixes consecutive multiplies in the polygon demo (#1043).
+* TOM PIT exposes live counters; unreadable TOM I/O falls back to MEMCON1
+  according to the original Atari netlists (#1044, #1045).
+* Fast blitter computed Z and Gouraud gradients follow A2 destination
+  lanes with DSTA2; fixes incorrect GT writes, with a bootable reproducer
+  and regression coverage in both engines (#1046, #1051).
+
+== Desktop app ==
+* TV mode: Home, Library, Game details and paused in-game menu;
+  TV-menu hold action and Ctrl/Cmd+Shift+T toggle (#995, #999, #1024).
+* Controller navigation of the desktop library; per-family and custom
+  profiles (#1030). Pro Controller X/Y/Z/L/R controls (#1019).
+* Optional fullscreen menu auto-hide; native chrome for detached tools
+  without duplicate in-app window controls (#1034).
+* Optional emulation thread, audio-clock pacing, RetroAchievements and
+  link play on the core owner, busy indicator (#1000, #1031).
+* Precise wakes, presentation pacing, late-latch deadline/event-wait
+  headroom and slower pad decay (#1018, #1023, #1035).
+* Queued commands apply before frame advances (#1033).
+* .m3u playlists and disc-menu fixes; disc swaps update content identity
+  while saves stay owned by the initially opened disc (#1006, #1009,
+  #1011, #1012).
+* Invalid playlists keep their playable discs visible; playlist states
+  keep per-disc ownership in desktop and TV mode, even with equal slot
+  numbers; resume retains the full disc list and playlist save RAM (#1042).
+* Achievement browser skips games without a set (#1015).
+* CD mirror artwork misses retried after restart (#998); website CD
+  artwork collection available as one ZIP (#1016).
+* Opt-in Neuro game API: AI Player 1, custom game profiles, held-input
+  release on disconnect, bounded stop, hardcore guard (#1001, #1027).
+
+== Known issues ==
+* Emulation thread disables Tools/debugger and GDB; rare host scheduling
+  stalls and display-locked pacing remain follow-up work.
+* TV settings, overlays, achievements screens and Auto mode are pending.
+* Core timing limitations, including Doom's attract demo, remain.
+
+Virtual Jaguar v3.9.1 libretro
+------------------------------
+
+Xenowings SFX, faster GPU idle skip, shaders on every app package.
+Full notes: docs/RELEASE_NOTES_v3.9.1.md
+
+Cart corpus byte-identical to v3.9.0 except Xenowings (SFX play),
+a frame or two of Skyhammer (GPU divide by zero) and the twelve loader
+fixes below. No option keys removed; savestate format stays v17.
+
+== Core ==
+* Xenowings shot/explosion sounds restored (#895, #954): an indexed
+  store right after a div waits for the quotient when its offset
+  field names the div's target (netlist scoreboard rule, errata B25).
+* RISC divide keeps 33 bits: divisors >= $80000000, overflowing 16.16
+  divides and divide by zero match the netlist (B26).
+* GPU idle skip admits invariant local-RAM long stores and the full
+  jr reach (#957): Doom EX 83M -> 36M instr/frame at 1x, 141M -> 37M
+  at RISC 2x. Corpus video/audio/state hashes identical.
+* Framebuffer overrun on wild video registers fixed (#944, #946).
+* GDB stub works with stock gdb: real 68K target description,
+  detach/kill, watchpoints, full monitor output (#936, #948).
+* Loader: DRI 601A executables, JAGR type 2, headerless BJL programs
+  at $4000, Painter (bin) at $10000, $802000-linked images (Rayman
+  Demo, BadCode4 (rom)), erased $404 enters at $802000 (Phase Zero,
+  Developer CD BIOS .j64)
+  -- twelve files (#971-#974, #978, #979).
+* Legacy MSVC 2005/2010 buildbot builds link again: snprintf shim
+  for the debug interface's disassembler (#981, #982).
+
+== Downloads ==
+* Every macOS download is signed and notarized: core dylibs,
+  cue2cdi, Jaguar CD tools and the app (#989, #990).
+* macOS chdman no longer needs Homebrew SDL3; universal binary for
+  macOS 11+ (#993, #994).
+
+== Desktop app ==
+* Shaders on Intel Macs, AppImage, .deb (librashader built from
+  source, #955) and the Flatpak (#953); the Shader section explains
+  when the runtime is unavailable.
+* Settings > Interface tab: theme, font, FPS, overlay, resume,
+  library and desktop options moved out of Video/Storage (#941).
+* Font picker: installed fonts, favorites/recents, per-font preview,
+  debugger monospace font (#943).
+* Pacing no longer sleeps while behind (#956).
+* BIOS selector picks the clicked file; FPS label under menus;
+  duplicate ImGui IDs fixed (#940, #941).
+
+== Known issues ==
+* Doom's attract demo runs too fast (#401).
+* Blit Memoization, DRAM Timing and GPU/DSP Pipeline Timing switch
+  the idle-loop fast-forward off while enabled.
+* Windows packages are not signed yet.
+
+Virtual Jaguar v3.9.0 libretro
+------------------------------
+
+RISC overclock fix, experimental DSP timing model + the desktop app.
+Full notes: docs/RELEASE_NOTES_v3.9.0.md
+
+Default settings are byte-identical to v3.8.0 in the cart and CD boot
+matrices. No option keys removed; savestate format stays v17.
+
+== Core ==
+* RISC clock 0.5x/1.5x/2x no longer turns the GPU/DSP idle-loop
+  fast-forward off (#891). The skip is exact at any scale (video,
+  audio and savestates byte-identical on/off). Core fps at 2x: Doom
+  52 -> 82, AvP 71 -> 204, Tempest 2000 77 -> 209. 1x unchanged.
+* Timing work (#908): S0 (Doom pace gate, GPU busy counter, Checkered
+  Flag canary) and S2 (bus census) are measurement tooling, no
+  behaviour change. S1, a DSP pipeline model, rides on the "GPU/DSP
+  Pipeline Timing (Experimental)" option (formerly "GPU Pipeline
+  Timing"), OFF by default; if you had it on you now get the DSP
+  model too. It does not improve pacing yet (Checkered Flag: 4.9
+  fields per game frame vs its 3.0 cap).
+* Clock scale options also accept a percentage (25-400, e.g. 175%);
+  listed values unchanged. GDB halt timeout clamped to 1 h (#906).
+* A private frontend channel and debug interface (#906, #910, #919)
+  that only the desktop app answers; RetroArch never sees them.
+
+== Desktop app (#867, #833) ==
+* Standalone emulator for macOS, Windows and Linux in app/: SDL3,
+  Dear ImGui, OpenGL 3.3, driving the core through the retro_* API.
+
+Library and artwork
+* Home-screen library: Cartridges, Jaguar CD and BIOS & system tabs,
+  CRC32 identification, box art on demand, Ctrl/Cmd+scroll or pinch
+  to resize tiles (#838, #881, #889, #899).
+* Favorites, Recently played and a Save states tab with each state's
+  screenshot (click to start from it); right-click: Play, Load
+  state, favorite, Show in Finder (#915).
+* Jaguar CD covers: title cards, your own PNG (right-click, drop, or
+  covers folder) (#901), then a set hosted on the project site (#907).
+* .chd discs checksummed, .cdi best-effort, non-Redump rips matched by
+  file/folder name when unambiguous (#901). CHD verified on synthetic
+  images only.
+
+BIOS
+* Settings > BIOS (and the BIOS & system tab): pick the exact boot ROM
+  / CD BIOS file, switch carts and CD games between HLE and the real
+  BIOS with nothing loaded, import a dropped BIOS, boot the CD BIOS
+  (no disc) or the cart boot ROM (empty slot) on its own (#910, #899).
+
+Playing
+* Controls: per-device and per-game remapping, 12-key keypad on a
+  gamepad, 6-button keyboard layout, on-screen keypad (F2), controls
+  overlay (F3; click, tap or Esc hides it; off at boot by default); mice, rotary, analog, driving, paddle, 6D, light gun,
+  Team Tap (#837, #879, #887).
+* Save states with thumbnails and a manager. Resume where I left off
+  (Off/Ask/Always, default Ask): an Auto-save on close, switch or
+  quit. Not in hardcore or netplay (#915).
+* Cheats: libretro database bundled plus manual codes (#835, #878).
+* Shaders: .slangp presets via librashader, CRT/scanline/sharp-
+  bilinear presets bundled, integer scaling (#834, #880, #897).
+* Several windows: File > New window (Ctrl/Cmd+N); extra copies get
+  their own save folder, leave shared settings alone, can be pinned
+  to one controller (#902).
+* Netplay window for the link-cable games on a LAN (not rollback,
+  #864); Settings greys out the link options it controls (#888, #898).
+* Typed settings: presets plus "Custom..." for ports, hosts, GDB
+  timeout, sensitivities, tuning, clock scales (#906).
+* Reset group buttons and Reset all settings...; bindings, overrides,
+  library folders and logins kept unless ticked (#911).
+* Release builds at -O3; shader chain skips unchanged frames (#894).
+
+Look and feel
+* Light and dark themes (System follows the OS live); Customize...
+  edits colours, rounding and spacing with a contrast warning;
+  export/import (#920). Windows are opaque (#904).
+* Interface font: Retro (default), system UI, monospace or your own
+  .ttf/.otf, 11-24 pt, sharp at Retina / 125-200% scaling (#925).
+* Native OS integration (#912): macOS menu bar and Dock menu;
+  Windows dark title bar, Jump List, optional file associations;
+  Linux MIME types and desktop actions; double-click, Open With and
+  drop on the icon everywhere; screensaver allowed outside a running
+  game; optional tray / menu-bar icon.
+* Settings, Achievements, Cheats and the tools can be dragged out of
+  the main window into OS windows of their own (default on macOS and
+  Windows; not on Wayland); macOS can keep the in-window menu bar
+  next to the native one (#833).
+
+RetroAchievements and Discord
+* RetroAchievements: softcore default, optional hardcore (#836,
+  #882). Avatar, game icon and badges; a dashboard of Jaguar games
+  with your progress and Play for owned ones (#917).
+* The login token is kept in the system keychain (macOS, Windows,
+  Linux Secret Service), not config.ini (#923).
+* Discord Rich Presence: game, box art, play time and achievement
+  progress, with a Get Virtual Jaguar button (#922).
+
+Debug tools (Tools menu; off under hardcore; RetroArch unaffected)
+* Memory viewer/editor, palette editor (#913), cheat scanner (#914),
+  Object Processor list (#918), blitter log, texture browser, audio
+  scope (#916), CPU debugger for 68000/GPU/DSP (#924); F9 break, F10
+  step (#919). Register writes need a tick; CD registers and B_CMD/
+  G_CTRL/D_CTRL/OLP/LTXD/RTXD are never written (docs/app-debug-
+  tools.md).
+
+Packaging and signing
+* macOS universal zip; Windows x64 and ARM64 zip + installer; Linux
+  AppImage, .deb, and a Flatpak bundle (x86_64) (#903, #839, #840);
+  nightly builds linked from the pinned builds issue.
+* Local signing: app/packaging/local-package.sh --sign [--notarize]
+  with a certificate found on the machine or set in a gitignored .env
+  (macOS Developer ID, Windows pfx/store) (#905, #909).
+
+== Known issues ==
+* macOS packages are signed with a Developer ID and notarized;
+  Windows packages are not signed yet (SmartScreen may warn).
+* Shaders may be unavailable on Intel Macs (arm64-only librashader in
+  the universal package); Linux needs librashader installed; the
+  Flatpak has no shaders.
+* The MSVC Windows build is experimental.
+* RetroAchievements does not identify .chd or .cdi discs yet.
+* Netplay is LAN link-cable play only.
+* Double-click opens a second instance on Windows and Linux.
+
+Virtual Jaguar v3.8.0 libretro
+------------------------------
+
+Correct by default. Full notes: docs/RELEASE_NOTES_v3.8.0.md
+
+== Game fixes ==
+* Flip Out runs in both boot modes (#851, #855). 1, 2 and 4 MB cart
+  images now repeat across the cart window, as on hardware (MiSTer
+  cart_mask). Headless-verified only.
+* Fight For Your Life (1996) boots on the real BIOS (#856, #868).
+  BIOS-mode power-on RAM is now zero-filled like HLE; the random fill
+  let a game fill overrun the GPU's parameter block. Headless only.
+* Club Drive has audio under HLE (#744, #849). DSP interrupts are taken
+  at the DSP's next instruction, not inside the I2S event callback.
+  Confirmed by ear in RetroArch on iOS.
+* White Men Can't Jump gameplay stops tearing (#736, #870). Blitter Bus
+  Timing gains a "68000 only" value and the title's preset uses it; the
+  intro logo fix still holds. Some flicker remains. Headless only.
+* Music Demo: no DSP runaway at start (#853, #862). Instructions right
+  after a D_FLAGS store use the old register bank (JTRM v8 p.109).
+  Confirmed in RetroArch on iOS. The GPU gets the same retire window
+  for G_FLAGS (#865, #869); no title is known to change.
+* Ruiner Pinball: no GPU escape (#866, #873). Every GPU long-store form
+  now drops the low address bits. Native Demo (bin) loads at $5000 and
+  boots (#866, #872). Both headless only.
+* Doom 2-player netplay holds 60 fps instead of 30 Hz (#860, #861,
+  #871). Over Wi-Fi it is still slower than single player: the link
+  protocol is latency-bound (epic #864).
+
+== New ==
+* GameDrive SD card backed by a host folder, jaggd-sd in the save
+  directory (#783, #844). New option "Jaguar GameDrive SD Card"
+  (Read/write by default, Read-only, Disabled). GPU and async reads are
+  not implemented yet. A bad directory handle no longer leaks host
+  memory, and a state with no card configured reopens nothing.
+* Per-title rows are enhancement or compatibility class; compatibility
+  rows are never withheld and cite their ticket (#748, #842). CD titles
+  are keyed by boot-stub CRC32; the disc table ships empty (#747, #843).
+* RetroArch shows which per-title presets were applied at load; option
+  sublabels explain the current state; load-only options say "Restart
+  required"; cartridge-only options are hidden for CD content (#841,
+  #847, #850, #859).
+* BIOS (Cartridges) and PAL apply only at content load; a mid-game change
+  logs a "takes effect on restart" line (#858, #863).
+* Towers II no longer defaults to 2x internal resolution (#809, #848).
+
+== Savestates ==
+* Version 17. v16 and older states still load; v17 states do not load
+  in older builds.
+* Appended chunk: JGF1 (GameDrive SD handles, #844). The DSP and GPU
+  retire windows use spare bits of an existing byte. See
+  docs/savestate-compat.md.
+
+== Testing ==
+* Release gate vs v3.7.1: no row moved backward in either matrix.
+* Cart corpus, 155 titles: 155/155 HLE reach game code; BIOS 141 game
+  code + 14 BIOS_REJECT (alternate/bad dumps the boot ROM refuses, now
+  visible because BIOS rows are scored from the handoff, #852, #854).
+  8 rows improved (Ruiner Pinball, Native Demo (bin), Music Demo BIOS,
+  Jaguar Server 50/60 Hz and Painter BIOS).
+* CD corpus: 28 of 28 discs reach game code in both modes, unchanged.
+* make test passes on the corpus machine with the audio pair run.
+
+== Developer / CI ==
+* matrix_diff.py and the never-backward pre-tag gate (#749, #846).
+* cart_boot_probe --post-handoff, cart_classify.sh with BIOS_REJECT and
+  ? (bios_trap) (#852, #854).
+* Harness --input-bitmasks (#857); netlink_sim and netlink delay-proxy
+  jitter/spike/loss options (#861, #871).
+
+== Known issues ==
+* Headless-verified only: Flip Out, Fight For Your Life BIOS, White Men
+  Can't Jump, Ruiner Pinball, Native Demo (bin), the GPU retire window,
+  BIOS/PAL latching, preset notices and the GameDrive SD card.
+* JaGol (JaguarDemos) shows an almost empty field: it seeds from
+  power-on RAM, now zero in BIOS mode (#876). algorip and solidWaves are
+  also marked FAIL in the JaguarDemos baseline; their old pass was
+  random RAM on screen (#877).
+* #737 (FMV interactive scenes) closed with no core defect found.
+
+
+Virtual Jaguar v3.7.1 libretro
+------------------------------
+
+Broken-games release, continued. Full notes: docs/RELEASE_NOTES_v3.7.1.md
+
+== Game fixes ==
+* Xenowings is playable (#811). It needed four fixes: TOM bug 13 (#819),
+  JERRY bug 13 (#822) and JERRY bug 2 (#825) from Atari's own hardware
+  bug list, plus 68000 prefetch-queue emulation for its self-modifying
+  anti-tamper check (#823); #824 keeps the GPU idle-loop fast-forward
+  consistent with the bug-13 rule. Headless-verified only; not yet
+  confirmed in RetroArch.
+* Club Drive no longer crashes when driving, and its walls, ceilings and
+  horizon render as on hardware (#611, #828, #829). GPU and DSP NORMI returned one
+  too high for every input; Club Drive uses it to pick a corner when
+  clipping polygons, so a polygon crossing two screen edges came out
+  twisted and the GPU ran off into garbage.
+* The 7 homebrew carts that froze on the Accurate blitter now run (#800,
+  #817). The cause was a 68K running away after ILLEGAL in an uploaded
+  executable, not a slow blitter; vector 4 is now parked at $1000.
+* A blit that never ends no longer freezes RetroArch (#794, #817).
+  The emulated blitter hangs like the chip does (busy status, further
+  starts ignored, cleared on reset) and the host keeps running.
+* Six homebrew binaries linked at $5000 were loaded at $4000 and now load
+  at the right address (#818, #826): Chroma-Luma (bin), JagMania
+  (Jul 8), JagMarble (2000), FORCE Design Legion Force Jidai Intro Demo 0!,
+  Joypad-TeamTap Tester [a1], Music Demo (ScatoLOGIC). This is also the
+  real cause of the Music Demo BIOS-mode blitter spray in #794.
+* White Men Can't Jump intro logo (#736, #827): only the first logo's
+  apex showed. The title now defaults Blitter Bus Timing on, so the 68K
+  stalls behind the blitter as on hardware and the GPU logo decode
+  finishes before the fade. The rest of the game is not claimed fixed.
+* Memory Track saves work after a no-content boot plus a disc insert
+  (#810, #815): save RAM is exposed whenever the Memory Track is
+  enabled, and the insert reinstalls the NVM BIOS module. Not yet
+  verified in RetroArch.
+* Real-BIOS CD run-ahead and rewind stay in sync (#804, #814).
+  Hover Strike with cd_boot_mode=bios diverged because the boot-stub flag
+  and the CD FIFO refill phase were outside the savestate.
+
+== Savestates ==
+* Version 16. v3.7.0 (v15) and older states still load; v16 states do not
+  load in older builds.
+* Appended chunks: CDB1 and CDX1 (real-BIOS CD boot flag and refill phase,
+  #814) and BLH1 (blitter hung flag, #817). A missing chunk loads as
+  the default. See docs/savestate-compat.md.
+
+== Documentation ==
+* New docs/jtrm-errata.md (#820, #821): where Atari's manual is wrong
+  or silent, and which entries in Atari's own hardware-bug list the core
+  emulates.
+* 110 corrections to the distilled docs/jtrm-*.md files, each re-read
+  against the PDF. Docs and comments only; no behaviour change.
+* Cart and CD boot matrices regenerated for v3.7.1 (#830); site pages
+  audited for v3.7.0 (#808).
+
+== Testing ==
+* Cart corpus, 155 titles. Fast blitter: 155/155 HLE and 154/155 BIOS reach
+  game code. Accurate blitter: 155/155 in both modes, up from 148 HLE and
+  136 BIOS in v3.7.0.
+* CD corpus: 28 of 28 discs reach game code in both modes, unchanged.
+* NORMI corpus sweep: only Club Drive, Checkered Flag and Native Demo
+  change. Club Drive's rendering was confirmed correct by the maintainer.
+
+== Developer / CI ==
+* pr-link-issue.sh uses distinct exit codes and the workflow reads them;
+  release.yml target count corrected to 24 (#812).
+* test_cd_bios_boot now fails when the CD transfer wedged (#799, #813).
+* voicemodem pair test waits for its peer, not the wall clock (#796,
+  #816).
+* New ROM-gated checks: test_blitter_hung, test_upload_illegal_park,
+  test_club_drive_611, xenowings_ingame_video, wmcj_intro_logo,
+  test_m68k_prefetch; NORMI cases in test_gpu_ops and test_dsp_ops are
+  taken from the netlist decode.
+* cart_boot_matrix.sh: CART_MATRIX_PROBE_ARGS knob; refuses to run without
+  an explicit CART_MATRIX_OUT.
+
+== Known issues ==
+* #737 (FMV interactive scenes) and #633 (AvP noise) were closed as not
+  reproducible. The FMV titles start on A/B/C, not START.
+* TOM bug 2 (GPU indexed store after divide) is not modelled; only the DSP
+  half is (#825).
+
+
+Virtual Jaguar v3.7.0 libretro
+------------------------------
+
+Broken-games release. Full notes: docs/RELEASE_NOTES_v3.7.0.md
+
+== Game fixes ==
+* Baldies no longer freezes in its intro, in HLE or BIOS boot mode
+  (#738, #750, #752).
+* Myst boots from CHD images and gets past the Cyan logo in both boot
+  modes (#754-#757).
+* World Tour Racing gets past its title screen (#589, #759).
+* PolyEngine boots and draws polygons (#785, #790, #791).
+* PlaySFX and other headerless raw-binary homebrew load in HLE (#739, #805).
+* Vid Grid, Ocean Depths, Simone, Fast Food 64, Frogz 64 and Saucer Wars
+  each have a fix (#760-#765).
+* HLE CD titles are deterministic under run-ahead and rollback, and a
+  state saved mid-load resumes the load (#787, #803).
+
+== Savestates ==
+* Version 15. v3.6.x (v14) states still load.
+
+
+Virtual Jaguar v3.6.1 libretro
+------------------------------
+
+No-content boot fix. Full notes: docs/RELEASE_NOTES_v3.6.1.md
+
+== Fixes ==
+* No-content boot now comes up in the CD BIOS, on its insert-disc screen,
+  instead of a bare console with an empty cart slot (#726). The CD BIOS is
+  mapped as a cartridge at $800000, so nothing reachable from the
+  empty-slot screen could get to it -- which made "launch bare, insert a
+  disc, reach the VLM" (#646 + #651) unreachable by construction. No files
+  are required: an external CD BIOS ROM in the system directory wins if
+  present, otherwise an embedded image is used.
+* The same path now reports CD mode with an empty tray rather than
+  cartridge mode, so the options menu is no longer inverted against a
+  machine sitting in the CD BIOS (CD Boot Mode / CD BIOS Type were hidden,
+  the cartridge-BIOS option shown), and the Memory Track cart is present
+  from boot rather than only after the first insert.
+* dist/info: supports_no_game is "true". It was left "false" when
+  SET_SUPPORT_NO_GAME shipped in v3.6.0, and RetroArch reads the info
+  database -- not the runtime environment call -- to decide whether to
+  offer a contentless launch, so the feature was never advertised.
+
+== Tests ==
+* Two tests asserted the old boot strategy and so encoded the bug. Both now
+  pin the corrected behaviour; test_disk_control case 1 pairs the strategy
+  name with isCDGame, because bare BIOS and a real-BIOS disc both resolve
+  to "bios" and comparing names alone would have gone vacuous.
+
+
+Virtual Jaguar v3.6.0 libretro
+------------------------------
+
+Debugger & libretro surface. Full notes: docs/RELEASE_NOTES_v3.6.0.md
+
+NOTE: this file has no sections for v3.1.0 through v3.5.1. The
+per-release notes in docs/RELEASE_NOTES_v*.md are complete and
+authoritative for those releases.
+
+== Debugging ==
+* GDB remote serial protocol stub (#652): attach m68k-elf-gdb or lldb over
+  TCP. Breakpoints, single-step, registers, memory. The GPU and DSP appear
+  as GDB threads, so all three processors are inspectable from one session.
+  Connect scripts, editor plugins and an installer are included.
+
+== libretro surface ==
+* Disk control interface (#651): launch with no content and insert a disc
+  afterwards; reach the Virtual Light Machine with an audio CD. Inserting a
+  disc RESTARTS the console -- the boot strategy is derived from the disc.
+  Eject is a frontend-level flag, not an emulated tray.
+* Savestates now record which disc was mounted and refuse a mismatch.
+  Older states are unaffected.
+* Auto frameskip driven by audio buffer status (#690).
+* Enhancement profile option: auto / quality / performance (#706).
+* No-content boot (#646).
+
+== Patching ==
+* docs/patching-a-game.md routes between cheats, soft patches, hooks and
+  per-title defaults -- previously three doors with no signpost (#637).
+* User-authorable hooks via <system>/vj_hooks.txt. Off by default; a hook
+  file cannot switch on its own gate. expect[] is mandatory and checked,
+  and any malformed line discards the whole file.
+
+== Performance ==
+* RISC idle-loop fast-forward is ON BY DEFAULT (#608), after a sweep of 148
+  cart images plus 6 CD spot-checks came back byte-identical. Also ported
+  to the GPU interpreter (#699).
+* NEON/SSE2 fast paths for OP phrase stores, TOM scanline converters, the
+  hi-res Stage-1 store and line resolve, and the voice-chat mixer.
+* ARMv8 hardware CRC32 with runtime dispatch; byte-swap intrinsics for
+  GET/SET; per-SoC ARM tuning; LTO by default on ELF targets.
+
+== Game fixes ==
+* White Men Can't Jump (#635): froze at the menus with no audio at all, in
+  both BIOS modes. A CPU interrupt delivered to an already-stopped DSP was
+  serviced by the next program loaded, whose handler shut it down.
+* Audio-only CDs route through the real CD BIOS, whose player front-end is
+  the VLM (#683).
+* Object Processor window/VBB clamps (#604, #641); nested blits refused
+  (#663, #677); widescreen statics reset per load (#605).
+
+== Build ==
+* Package.swift ships here, so Apple frontends stop vendoring a fork
+  (#614), guarded by a CI build and a source-list drift check.
+* Cross-platform core installer (#640).
+* SPM builds no longer inline the scalar blitter on arm64 (#612).
+
+Virtual Jaguar v3.0.0 libretro
+------------------------------
+
+Major release -- Jaguar CD, link-cable networking, and a wide
+compatibility wave. Full notes: docs/RELEASE_NOTES_v3.0.0.md
+
+== Jaguar CD ==
+* The full local 10-title corpus (Baldies, Battle Morph, BrainDead 13,
+  Dragon's Lair, Highlander, Hover Strike, Iron Soldier 2, Primal Rage,
+  Space Ace, Myst) boots to game code in both HLE and real-BIOS mode.
+* CUE/BIN and CDI images; `test/tools/cue2cdi` converts CUE/BIN to CDI.
+* Memory Track NVM is HLE'd, so Vid Grid and friends save again (#258).
+* HLE-path CD read speed is selectable (1x/2x/4x/8x/instant).
+* Bare .iso images are refused at load with an explanation -- a
+  2048-byte-sector ISO cannot represent a Jaguar disc's two sessions.
+
+== Networking ==
+* JagLink / CatBox link hardware emulated at the JERRY UART level, with
+  a direct TCP transport, the libretro netpacket interface (RetroArch
+  netplay), and a CatNet-style multi-peer hub.
+* Validated over TCP on localhost/LAN: Doom deathmatch, AirCars
+  (2-player and 3-console hub), BattleSphere Gold to lobby entry.
+* Host address is a core option and resolves hostnames, not just
+  dotted quads (#253); vj_netlink.txt is now a fallback.
+
+== Compatibility ==
+* Wolfenstein 3D missing music (DSP D_FLAGS pipeline stage).
+* Pitfall black screen shortly into gameplay (68000 group-0 exception
+  frame + GPU STOREP byte-lane masking) (#138).
+* Tempest 2000 one-frame playfield collapse (TOM level-2 IRQ request
+  held across the CPU interrupt mask) (#187).
+* Alien vs Predator first-frame cyan bar and in-game brown bottom bar
+  (#178).
+* Brutal Sports Football copier-header carts load instead of being
+  rejected.
+
+== Interface ==
+* Core options grouped into 9 categories, with options that do not
+  apply to the loaded content type hidden dynamically (#251).
+* i18n scaffolding (Crowdin workflow + libretro_core_options_intl.h);
+  no languages translated yet.
+
+== Housekeeping ==
+* Savestate format is v7 and frozen from this release. States from the
+  v2.x line still load with newer fields defaulted.
+* Acid test suite reconciled against the JTRM and its CI gate fixed, so
+  the job now actually blocks on regressions.
+* New experimental `virtualjaguar_dram_timing` bus model, default off.
+
+
+Virtual Jaguar v2.3.2 libretro
+------------------------------
+
+Correctness and housekeeping. Full notes: docs/RELEASE_NOTES_v2.3.2.md
+
+== Compatibility ==
+* Battle Sphere Gold now launches with the HLE BIOS (#181).
+* Save states from v2.3.0/v2.3.1 still load -- retro_unserialize now
+  accepts a version range instead of an exact match.
+* Advertised max_height now bounds the frames the core actually emits,
+  so drivers no longer clip or drop 241-line NTSC output.
+
+== Graphics ==
+* Ten blitter accuracy fixes checked against the JTRM: DCOMPEN colour
+  keying, A2 texture-wrap masking, CLIP_A1 caching, accurate-writeback
+  outer-loop step, z-comparator lane in 16bpp pixel mode.
+* BIOS boot-animation artifacts fixed (#180).
+
+== Interface ==
+* Core options reworded: Blitter is now Accurate/Fast and BIOS is now
+  HLE/Real (#184). Stored values are unchanged, so settings carry over.
+
+== Housekeeping ==
+* Dropped two unused 128 KB boot-ROM blobs -- 258 KB smaller binaries.
+* New regression tests: save-state version gate, frontend pacing /
+  fast-forward contract, advertised-geometry bounds, plus a
+  build-identity guard against testing stale binaries.
+
+
+Virtual Jaguar v2.3.1 libretro
+------------------------------
+
+Maintenance release. Full notes: docs/RELEASE_NOTES_v2.3.1.md
+
+
+Virtual Jaguar v2.3.0 libretro
+------------------------------
+
+Full notes: docs/RELEASE_NOTES_v2.3.0.md
+
+
+Virtual Jaguar v2.2.0 libretro
+------------------------------
+
+A large libretro-fork release. Highlights since v2.1.0:
+
+== Compatibility ==
+* HLE BIOS improved — boot most commercial titles without a real
+  BIOS image. Many games that previously needed the real BIOS, or
+  worked-but-broken with it, now run on HLE BIOS too.
+* Many homebrews now boot — non-Alpine raw .bin/.j64/.rom layouts
+  are accepted at common startup bases ($4000, $20000, $802000),
+  with conservative validation so unknown content fails fast
+  instead of running into garbage.
+* Compatibility list with per-game status is maintained in
+  docs/emulation-bug-hunt-todos.md (see the "Game compatibility
+  (v2.2.0)" section).
+
+  Closes the long-standing libretro tracker:
+   - libretro/virtualjaguar-libretro#27 — improve emulation accuracy
+   - libretro/virtualjaguar-libretro#85 — make HLE actually usable
+   - libretro/virtualjaguar-libretro#38 — many sub-issues addressed
+     (per-game details in the compatibility doc)
+
+== New features ==
+* Save states (retro_serialize / retro_unserialize) with
+  deterministic serialization for run-ahead.
+* SRAM / EEPROM via the libretro SRAM interface, preserved
+  across soft resets.
+* Cheat code support (retro_cheat_set / retro_cheat_reset).
+* RetroAchievements memory map (RC_CONSOLE_ATARI_JAGUAR).
+* Audio rewrite: eliminated per-sample events and interleaved
+  JERRY with the main execution loop, fixing frame-edge audio
+  dropouts.  retro_run() now does
+  `update_input -> DACPrepareFrame -> JaguarExecuteNew ->
+  cheat_apply_all -> SoundCallback -> video_cb` so the audio
+  callback sees the same JERRY state the frame was rendered
+  against and doesn't drift.
+* Per-button retropad remapping via core options
+  (RetropadOptionMapping table + virtualjaguar_p1/p2_retropad_*
+  options).  Lets users rebind the Jaguar's 21-key controller
+  including numpad keys that the Controls menu can't reach.
+* libretro geometry change is now applied at the START of
+  retro_run rather than after video_cb.  Fixes Wolf3D black
+  screen on iOS Metal RetroArch (frontends that re-allocate
+  texture on SET_GEOMETRY were dropping the frame submitted at
+  the old size; pre-rendering means tomWidth and screenPitch
+  stay in sync for the entire frame).
+
+== Hardware accuracy (chip side) ==
+* DSP: 40-bit MAC accumulator, FLAGS-write dispatch, IRQ
+  enable-on-set, IMASK preservation, ADDC carry overflow.
+* GPU: ADDC carry, IMASK preservation, DIVL exception PC,
+  PACK coverage, missing symbol exports.
+* Accurate blitter: daddmode NAND tree, daddbsel bit 3,
+  ADDARRAY cinsel carry input, M2 BKGWREN+BCOMPEN phrase
+  mode (Alien vs Predator red-noise), SRCSHADE color.
+* Object Processor: scaled-bitmap firstPix + left/right/
+  reflected edge clipping, 1:1/3:2/2:1 hscale ratios,
+  fixed-bitmap firstPix for 2/4/16/24 BPP, OP GPU-object
+  handling.
+* TOM: IRQ pending latches even when CPU enables are clear;
+  enabling a pending source raises IPL2 cleanly. Horizontal
+  counter reads advance. Doom resolution hack replaced with
+  proper PWIDTH pixel replication (the hack option is gone).
+* JERRY: interrupt-control decode, aligned PIT register
+  access.
+* 68K: TOM underflow handling, mixed-declaration cleanup.
+* Event system: zero eventTime on init, full slot scan,
+  timing-rollover and due-event handling.
+
+== Performance ==
+* ~2x speedup on DSP / GPU / memory hot paths.
+* SIMD-accelerated blitter (SSE2, NEON, scalar) with
+  bit-exactness CI.
+* Accurate-blitter inner loop tightened.
+* Note: the accurate blitter is still notably slower than the
+  fast blitter; some games (e.g. Tempest 2000) may run below
+  full speed on lower-end hardware. The fast blitter remains
+  available via core option.
+
+== Tooling and testing ==
+* Headless `make test` harness covering HLE BIOS state,
+  event queue, blitter SIMD bit-exactness, DSP MAC40, cheat
+  decoder, memory map / RetroAchievements wiring, save-state
+  round-trip and rewind, plus a regression screenshot diff
+  via miniretro on push.
+* Boot-time audio clipping detector (test_audio_clipping):
+  captures the libretro audio batch, asserts on saturation
+  density / longest run at +/-32767 / sustained RMS, with a
+  healthy negative control and `--expect-clipping`-tagged
+  regression watchers for known-broken titles (Skyhammer,
+  Iron Soldier 2) so a future DSP-side fix flips CI red and
+  forces the manifest to be updated.
+* Source-tree reorganization into src/core, src/tom,
+  src/jerry, src/cd, src/bios, src/m68000.  Files now grouped
+  by chip / subsystem rather than the flat layout inherited
+  from upstream.
+* General code cleanup: removed dead inline-comment guesses,
+  promoted Jaguar memory layout / HLE BIOS magic numbers to
+  named constants at file scope rather than `#define`s
+  scattered inside JaguarReset(), and added explanatory
+  comments to non-obvious BIOS-handshake addresses (e.g.
+  $0804 Battle Sphere workspace flag, $F03000 GPU auth magic).
+* C89/GNU89 lint enforcement.
+
+== Build / platforms ==
+* MSVC 2005/2010 build fix (boolean.h vs stdbool.h).
+* Emscripten / WASM support, lighter NEON dcomp variant.
+* Portable xorshift PRNG for cross-platform RAM init.
+* Automated release workflow for tagged versions.
+* Debug-build timestamp reporting.
+
+== Known issues (still in flight) ==
+* Skyhammer / Iron Soldier 2 / Wolfenstein 3D audio: the
+  cart-side DSP audio engine doesn't run correctly under HLE
+  (Wolf3D produces no audio at all in either BIOS or HLE
+  mode after the BIOS startup tone; Skyhammer/IS2 produce a
+  saturated square wave on HLE).  Cause is shared: the BIOS
+  audio engine relies on DSP register-bank state that HLE
+  doesn't replicate, and copying just the engine code into
+  DSP RAM lets the DSP escape its work RAM by reading
+  uninitialized registers as jump targets.  Documented in
+  docs/emulation-bug-hunt-todos.md with concrete next steps.
+* See docs/emulation-bug-hunt-todos.md "Game compatibility
+  (v2.2.0)" — Hover Strike crashes during gameplay, Hyper
+  Force / Iron Soldier / Ruiner Pinball / Super Burnout /
+  Fight for Life / Towers II still have open issues, and
+  the accurate blitter has a Battle Sphere reticle-
+  transparency bug (fast blitter has a separate Battlesphere
+  Gold menu glitch).
+* Of the still-broken hang/crash titles, four (Hyper Force,
+  Iron Soldier, Ruiner Pinball, Super Burnout) fail
+  identically with real BIOS and HLE — not HLE-init issues,
+  real engine-level emulation bugs.
+* Jaguar CD support is in flight on a separate branch
+  (forthcoming PR), not part of this release.
+
+== Maintainers ==
+* libretro/Provenance fork: Joseph Mattiello (@JoeMatt,
+  Provenance-Emu).
+
+
+Virtual Jaguar v2.1.0 GCC/Qt
+----------------------------
+
+* Added gamepad support. [Shamus]
+* Added fullscreen option. [Shamus]
+* Added some more developer goodies to Alpine mode. [Shamus]
+* Re-added command line switches. [Shamus]
+* Moved JERRY into host audio IRQ. This should make sound much smoother, though
+  it may run ahead of the rest of the emulator. [Shamus]
+* Kludged a fix into the audio handler to set the correct frequency for audio
+  playback. Note that there could still be problems with this approach, as it
+  can be easily fooled. Thanks to Dr. Typo for the initial analysis and insight
+  into this bug. :-) [Shamus]
+* Preliminary fixes for proper emulation of memory reads between $200000 and
+  $800000. [Shamus]
+* Proper handling in the OP of objects with 0 IWIDTH. [Shamus]
+
+
+Virtual Jaguar v2.0.2 GCC/Qt
+----------------------------
+
+* Fixed problem on OP with 24BPP bitmaps. [Shamus]
+* Cosmetic GUI fixes. [Shamus]
+* Switched to UAE 68000 CPU core. [Shamus]
+* Fixed some RISC STORE and LOAD alignment issues. Still need to verify against
+  real hardware. [Shamus]
+* Fixed video frame timing for both NTSC *and* PAL. [Shamus]
+* Improved OP logging, added emulation of OP bug. [Shamus]
+* Fixed addressing bug with UAE 68000 core. [Shamus]
+
+
+Virtual Jaguar v2.0.1 GCC/Qt
+----------------------------
+
+* Fixed NTSC timings; they were hardwired to PAL rates. [Shamus]
+* Fixed possible missing trailing slash on path fields input by user. [Shamus]
+* Fixed exit hotkey to work on Win32. [Shamus]
+* Changed PAL/NTSC switch to only work when virtual machine is powered off.
+  [Shamus]
+* Miscellaneous documentation fixes. [Shamus]
+
+
+Virtual Jaguar v2.0.0 GCC/Qt
+----------------------------
+
+* Switched GUI to Qt. And there was much rejoicing. ;-) [Shamus]
+* Added detection code to fish out files from inside ZIP archives. What this
+  means is that now you can have other goodies inside of your ROM ZIP like
+  labels, box art, and overlays. See built-in help for details. [Shamus]
+* Various usability improvements, too many to list here. ;-) [Shamus]
+* Various compatibility improvements to the Jaguar core, too many to list
+  here. ;-) [Shamus]
+
+
+Virtual Jaguar v1.1.0 GCC/SDL (r299 - Never officially released)
+----------------------------------------------------------------
+
+* Switched OpenGL rendering to 32 BPP. This is not only how a real Jaguar
+  renders graphics, but it also gives VJ a nice speed boost. ;-) [Shamus]
+* Changed execution to a time-based solution so that timers and IRQs and
+  such can happen when they're supposed to. [Shamus]
+* Fixed blitter writes so that Intensity[0-3] and Z[0-3] are written in the
+  correct order. [Shamus]
+* Major rewrite of blitter to conform the the TOM ASIC nets. This should fix a
+  bunch of stuff that wasn't working correctly before. [Shamus]
+* Fixed writes to 64 bit blitter registers. [Shamus]
+* Refactored GUI to be more maintainable, better looking and more responsive.
+  [Shamus]
+
+
+Virtual Jaguar v1.0.7 GCC/SDL
+-----------------------------
+
+* Various fixes to make for smoother compilation on MacOS. [Adam Green]
+* Fixes to filetype parsing. VJ now properly recognizes .abs, .jag, .rom,
+  and .j64 files--be sure to check the README for the gory details! [Shamus]
+* Added a kludge to allow homebrew demos to run without a Stubulator ROM and
+  without crashing the emulator. [Shamus]
+* Fixed a blitter intensity addition problem. This fixes the title in Hover
+  Strike and the road/shadows in Checkered Flag. [Shamus]
+* Partially fixed a problem with the SUBC opcode in the RISC processors. This
+  allows Hover Strike, Phase Zero and Fight For Life to boot into their title
+  screens and makes them somewhat playable. [Shamus]
+* Fixed a horizontal scaling problem in the OP and the off-by-one bug that it
+  reintroduced. This fixes the road in Atari Karts and probably a few others.
+  [Shamus]
+* Fixed a long standing blitter bug that kept certain doors in AvP from
+  rendering correctly. [Shamus]
+* Fixed some vertical positioning bugs in the OP. Now Checkered Flag, Alien
+  vs Predator and probably others now work as they should (graphically ;-)
+  [Caz]
+* Better GUI support. Most options in the GUI work now, and more are expected
+  to be functional in the near future. [Shamus]
+* Fixed a few more lingering blitter bugs (there are more to be found). This
+  fixes most of the glitches in Cybermorph and Alien vs Predator. [Shamus]
+* Fixed an Object Processor scaled bitmap bug that caused incorrect
+  positioning of scaled bitmaps that started outside the line buffer, and
+  also fixed a problem that caused the OP to hang in certain situations. This
+  fixes Bubsy, International Sensible Soccer, and probably a few others.
+  [Shamus]
+* Cleaned up various bits of video rendering related code. [nwagenaar]
+* Added support for OpenGL textures with a depth of 16bpp, 24bpp or 32bpp.
+  [nwagenaar]
+* Rewrote several OpenGL related rendering code concerning the new OpenGL
+  texture depths and texture sizes. [nwagenaar]
+* Rewrote several OpenGL rendering functions concerning speed related items.
+  [nwagenaar]
+* Several bugs resolved due to OpenGL and normal rendering code. [nwagenaar]
+* Default resolution for OpenGL is now 640x480. [nwagenaar]
+
+
+Virtual Jaguar v1.0.6 GCC/SDL
+-----------------------------
+
+* Added support for gzipped ROM files. [Adam Green]
+* Added OpenGL support. Because of this, aspect ratios in the various
+  graphic modes should be correct now. Thanks goes to Niels for enlightenment
+  in this area. :-) [Shamus]
+* Moved all platform specific video code to video.cpp. This should make it
+  easier to add functionality to the video subsystem without having to chase
+  code around in places where it didn't belong. [Shamus]
+* Key bindings are now customizable. [Shamus]
+* VJ now uses a config file (vj.cfg) for commonly used settings. Settings in
+  the config file can still be overridden by command line switches. [Shamus]
+* Preliminary GUI mouse support. [Shamus]
+* Fixed an off-by-one bug in the Object Processor when dealing with scaled
+  bitmap objects. [Shamus]
+* Fully virtualized screen size. What this means is that we can keep the
+  Jagaur screen displayed in a convenient size (320 x 240) and the graphics
+  that various ROMs display will now be properly centered (more or less, they
+  were really centered for a TV display). [Shamus]
+* Border color is now displayed properly. [Shamus]
+* Fully pipelined DSP core. Because of this, Wolfenstein 3D now has sound. To
+  use the old core, use the -nopipeline switch. [Shamus]
+
+
+Virtual Jaguar v1.0.5 GCC/SDL
+-----------------------------
+
+* Various fixes to the codebase so that it compiles and works properly on
+  Linux. :-) The makefiles are almost identical now, the only thing that's
+  different between them are the SYSTYPE and EXESUFFIX variables defined at
+  the top. [Shamus]
+* Fixed a pernicious blitter bug that kept Rayman from doing proper collision
+  detection. [Shamus]
+* Added a simple file selector so that typing in long filenames in order to
+  run the emulator is no longer necessary. :-) To use it, instead of
+  supplying a ROM name, simply put in the name of the directory where your
+  ROMs live. [Shamus]
+* Removed all the assembly language code from the DSP, so it should be a
+  little less buggy now. Also, removed some brain-dead timeslice releasing
+  that was causing a bunch of problems with various ROMs. [Shamus]
+* Added sound support! In order to hear any sound, you probably have to
+  start VJ with the -dspon switch. Also, unless you have a very fast computer
+  the sound is going to be choppy. Hopefully future optimizations will cure
+  this. ;-) [Shamus]
+* Added GUI support. You can see the results by hitting the TAB key while the
+  emulator is running. ;-) [Shamus]
+* Lots of cleanups to the source code including the ability to trace who
+  writes what to where. [Shamus]
+
+
+Virtual Jaguar v1.0.4 GCC/SDL - source only release
+---------------------------------------------------
+
+* Lots of bugfixes. [Shamus]
+* Jaguar BIOS now works properly and is used by default. BIOS failure was
+  due to a bug in the GPU (specifically in the SUBC and ADDC opcodes). To
+  override this behavior, use the -nobios switch. [Shamus]
+* Rewrote the OP code--mostly because it was pissing me off. ;-) Not
+  to mention that it was almost completely unmaintainable in its former
+  state and was just plain wrong in its implementation in many places.
+  Because of this, some RMW effects that were missing from AvP are present
+  now and leftover crud in scaled bitmaps in Rayman is gone now. ;-) [Shamus]
+* ZIP support! Now there is no longer any need to unzip ROMs (although if
+  you prefer to waste HD space, VJ will gladly accomodate you). The code to
+  support this is a pretty ugly hack, but it works and there are other fish
+  to fry at the moment. Also, ZLIB is now required to compile VJ. [Shamus]
+* Support for PD ROMs. Currently the only one that works at all is JagMania,
+  though as the hardware emulation gets better more PD ROMs will begin to
+  work. Note that you must use the -nobios switch for this to work. [Shamus]
+* Preliminary support for PAL Jaguar emulation. Default is NTSC. To use it,
+  use the -pal switch. [Shamus]
+* Support for DSP activation. The DSP is now *off* by default, since it
+  doesn't work properly yet. Use the -dspon switch to force the DSP on.
+  [Shamus]
+* Removed all hacks that were written to support a specific ROM from the OP
+  and GPU code (much more remains to be removed). Since the CRCs that were
+  calculated to support these hacks were done on byte swapped ROMs, they
+  weren't working anyway. Besides which, a hack means that you don't
+  understand the hardware properly and/or don't know how to write the code to
+  properly emulate the hardware. ;-) [Shamus]
+* Renamed the executable from the ridiculously named jag_em to the more
+  sensibly named vj. Note that the Jag_em.cpp file has also been changed to
+  reflect this name change. [Shamus]
+* Removed Aaron Giles 68K dissasembler in favor of the one included with the
+  Musashi core. It's there, why not use it? ;-) [Shamus]
+* Reordered the order of A, B, and C buttons to more accurately reflect their
+  respective positions on a real Jaguar controller. Also fixed a small bug that
+  kept the number pad from reporting the right numbers to the emulator. :-)
+  [Shamus]
+* Started to remove the !__PORT__ defintions from the source code. Since this
+  is supposed to be a portable emulator, we won't be using any MS specific
+  code anyway. [Shamus]
+* Fixed some problems with the blitter when doing clipping and bit expansion.
+  Also fixed (reintroduced?) a bug that existed in the real blitter HW (the
+  YADD1 bit in A2--fixes Tempest 2000). [Shamus]
+* Probably a bunch of other stuff that I've forgotten about. ;-) [Shamus]
+
+NOTE: Tested only on WIN32 platform! ;-)
+
+
+Virtual Jaguar v1.0.3 GCC/SDL - source only release
+---------------------------------------------------
+
+* Converted GNU assembly in the GPU core to C code -- Rayman and
+  Alien vs Predator work again. :-) [Shamus]
+* Removed closed source Starscream and replaced it with the open source
+  Musashi core. Because of this, VJ runs a little faster now. :-) [Shamus]
+* Various cleanups to the source files (still lots of work to do!). [Shamus]
+
+NOTE: Tested only on WIN32 platform!
+
+
+1.0.1 - 1.0.2 - Unreleased, mostly for testing/finding bugs
+-----------------------------------------------------------
+
+* Lots of stuff happened, but we can't remember any of it. :-)
+
+
+Virtual Jaguar v1.0.0 GCC/SDL - initial source release
+------------------------------------------------------
+
+* Converted VC++ assembly to standard GNU assembly.
+* Fixed small bugs in SDL related items (keyboard/graphics).
+* Added *some* optimalisations to the graphics sources.
+* Added joystick support (not tested).
+* Added joystick port support (not tested).
+* Added frameskip support.
+
+Source only release. Tested on BeOS, Linux, FreeBSD and WIN32.
+SOUND emulation was NOT done. Need help with this one :)
+
+
+SDLEMU (Niels Wagenaar & Caz) - http://sdlemu.ngemu.com

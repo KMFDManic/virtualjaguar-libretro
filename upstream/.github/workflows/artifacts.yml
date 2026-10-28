@@ -1,0 +1,106 @@
+name: Post build artifact links
+
+# Runs in the context of the base (upstream) repo after the build workflow
+# completes — this gives the GITHUB_TOKEN write access to PRs even when
+# the build was triggered by a fork PR.
+on:
+  workflow_run:
+    workflows: ["C/C++ CI"]
+    types: [completed]
+
+permissions:
+  actions: read
+  pull-requests: write
+
+jobs:
+  post-artifacts:
+    if: >
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Comment artifact links on PR
+      uses: actions/github-script@v9
+      with:
+        script: |
+          const run = context.payload.workflow_run;
+          const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${run.id}`;
+
+          // Find associated PR number from the triggering workflow run
+          const prs = run.pull_requests;
+          if (!prs || prs.length === 0) {
+            // Fallback: search for open PR matching the head branch/SHA
+            const { data: pulls } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              head: `${run.head_repository.owner.login}:${run.head_branch}`,
+            });
+            if (pulls.length === 0) {
+              console.log('No associated PR found, skipping.');
+              return;
+            }
+            prs.push(pulls[0]);
+          }
+          const prNumber = prs[0].number;
+
+          // Fetch artifacts from the completed workflow run
+          const { data: { artifacts } } = await github.rest.actions.listWorkflowRunArtifacts({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            run_id: run.id,
+          });
+
+          let rows = '';
+          for (const a of artifacts) {
+            const dlUrl = `${runUrl}/artifacts/${a.id}`;
+            rows += `| ${a.name} | [${a.name}](${dlUrl}) | ${(a.size_in_bytes / 1024).toFixed(0)} KB |\n`;
+          }
+
+          if (!rows) {
+            rows = `| - | No artifacts found | - |\n`;
+          }
+
+          // Check for existing comment to update (upsert pattern)
+          const comments = await github.paginate(
+            github.rest.issues.listComments,
+            {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              per_page: 100,
+            }
+          );
+          const marker = '<!-- build-artifacts -->';
+          const existing = comments.find(c => c.body.includes(marker));
+
+          const body = [
+            marker,
+            '### Build Artifacts',
+            '',
+            '| Platform | Download | Size |',
+            '|----------|----------|------|',
+            rows.trim(),
+            '',
+            `> [Full workflow run](${runUrl})`,
+            '',
+            `<sub>Updated by CI at ${new Date().toISOString()}</sub>`,
+          ].join('\n');
+
+          if (existing) {
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: existing.id,
+              body,
+            });
+            console.log(`Updated comment ${existing.id} on PR #${prNumber}`);
+          } else {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body,
+            });
+            console.log(`Created new comment on PR #${prNumber}`);
+          }

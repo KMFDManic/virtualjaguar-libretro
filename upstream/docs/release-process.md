@@ -1,0 +1,286 @@
+# Release process
+
+How to ship a new tagged release of the libretro core.
+
+## Branching model (GitFlow)
+
+This repo uses a [GitFlow](https://nvie.com/posts/a-successful-git-branching-model/)-style layout:
+
+- `master` — release-only.  Tagged commits, hotfix merges, release-branch merges.  Default branch on GitHub for visibility / clone defaults.
+- `develop` — integration branch.  All feature work flows in here first.
+- `feature/*` — branched from `develop`, merged back via PR.
+- `release/X.Y.Z` — branched from `develop` when cutting a release; bug-fix-only until tagged on `master`, then back-merged to `develop`.
+- `hotfix/X.Y.Z` — branched from `master`, fixed, tagged on `master`, back-merged to `develop`.
+
+PRs targeting `master` directly trigger a friendly comment from `.github/workflows/warn-pr-base.yml` asking the contributor to retarget to `develop` (skipped for `release/*` and `hotfix/*` source branches).
+
+## TL;DR
+
+1. Cut `release/X.Y.Z` from `develop`.  Bump the version in all three places -- `CORE_BASE_VERSION` in `Makefile`, `display_version` in `dist/info/virtualjaguar_libretro.info`, and `CORE_BASE_VERSION` in `src/core/version_fallback.h` (or use the `Bump Version & Release` workflow); `scripts/check-info-version.sh` fails CI if they drift.  Update `docs/RELEASE_NOTES_vX.Y.Z.md`.  Open a PR from `release/X.Y.Z` → `master`.
+2. Merge into `master`.
+3. `git tag vX.Y.Z && git push libretro vX.Y.Z` (or via GitHub UI).
+4. Watch [Actions](https://github.com/libretro/virtualjaguar-libretro/actions) — `release.yml` builds 16 platforms (14 in the build matrix, plus Vita and Switch in their own jobs), generates `SHA256SUMS.txt`, and publishes the release with `docs/RELEASE_NOTES_vX.Y.Z.md` as the body.
+5. **Back-merge `master` → `develop`** so the version bump and any release-branch fixes are in `develop`: `git checkout develop && git merge master && git push libretro develop`.
+6. After the tag publishes, send a small PR to [libretro/libretro-super](https://github.com/libretro/libretro-super) updating `dist/info/virtualjaguar_libretro.info` to match `dist/info/virtualjaguar_libretro.info` from this repo at the tag.
+
+## Detail
+
+### 1. Pre-tag checklist
+
+- `make` (default) builds clean, `make test` is green, `bash scripts/c89-lint.sh` passes.
+- The **audio pair is run by hand against the private ROMs**. `make test` runs
+  `test_audio_clipping` / `test_audio_presence` only if the ROMs are present and
+  prints `SKIP` otherwise — and still exits 0, so on a machine without them a
+  silencing regression passes unnoticed. Iron Soldier 1 presence should sit near
+  RMS 1175 (envelope 200–25000); Skyhammer and Iron Soldier 2 must pass
+  clipping cleanly (the old expected-failure guidance predates the MMULT fix);
+  retain the separate presence check so silence cannot pass as clean audio.
+- The acid gate is `python3 test/acid/scripts/check-baseline.py <results.log>
+  test/acid/BASELINE.txt` reporting `Regressions: 0`. `make -C test/acid test`
+  exits non-zero by design (it returns the FAIL count), so its exit status is
+  not the gate.
+- **Boot matrices: regenerate, diff, commit (#749).** The committed `docs/cart-boot-matrix.md` and
+  `docs/cd-boot-matrix.md` are the release compatibility statement, and the never-backward rule
+  (no row may move backward through the stage taxonomy or gain a crash-watchdog signature) is
+  enforced here, by hand, on the **corpus machine**. It cannot run in GitHub CI: the private ROM
+  and disc corpus is not available there. (The cart matrix went 492 commits stale across five
+  releases before this step existed.) From a checkout of the release branch with
+  `test/roms/private` populated:
+
+  ```
+  DEVELOPER_DIR=/Library/Developer/CommandLineTools make -j"$(getconf _NPROCESSORS_ONLN)" TEST_EXPORTS=1
+  DEVELOPER_DIR=/Library/Developer/CommandLineTools cc -O2 -Wall -std=c99 -I. -I./src \
+      -I./libretro-common/include -o test/tools/cart_boot_probe \
+      test/tools/cart_boot_probe.c test/harness/harness.c -ldl -lm
+  bash test/tools/cart_boot_matrix.sh     # -> docs/cart-boot-matrix.md (CART_MATRIX_OUT)
+  bash test/tools/cd_boot_matrix.sh       # -> docs/cd-boot-matrix.md   (CD_MATRIX_OUT)
+  ```
+
+  Both sweeps are long (the CD one is chunkable with `CD_MATRIX_MAX_RUNS`; the cart one with
+  `CART_MATRIX_MAX_RUNS`) and resume: only rows stamped by the *same* build are skipped, so a
+  stale row can never pass as fresh. Do not set `CART_MATRIX_PROBE_ARGS` for the committed
+  matrix: the script refuses it without an explicit `CART_MATRIX_OUT`, and the committed
+  baseline is the default (Fast-blitter) sweep. A shipped-default sweep
+  (`CART_MATRIX_PROBE_ARGS="--option virtualjaguar_usefastblitter=disabled"` plus its own
+  `CART_MATRIX_OUT=/some/other.md`) catches accurate-only hangs (#800), but there is no
+  committed baseline for it yet, so read that output by hand until one exists.
+
+  Then diff each regenerated file against the previous tag's copy:
+
+  ```
+  prev=vX.Y.Z-1   # the previous release tag
+  d="$(mktemp -d)"
+  git show "$prev:docs/cart-boot-matrix.md" > "$d/cart.md"
+  git show "$prev:docs/cd-boot-matrix.md"   > "$d/cd.md"
+  python3 -I test/tools/matrix_diff.py "$d/cart.md" docs/cart-boot-matrix.md
+  python3 -I test/tools/matrix_diff.py "$d/cd.md"   docs/cd-boot-matrix.md
+  ```
+
+  Exit 0 = nothing moved backward, 1 = at least one row did, 2 = a file did not parse (or the
+  two files are different kinds). Add `--json` for a machine-readable report.
+  - **A backward row blocks the tag** until it has a ticket and an explicit deferral (a comment
+    on the release PR naming the row, the ticket and who agreed to ship with it). A new
+    crash-watchdog signature on an unchanged stage counts as backward. Do not "fix" the diff by
+    editing the table or the tool's rankings; fix the emulator or defer the row.
+  - Read the **still-asymmetric** list too (cart: HLE stage != BIOS stage; CD: the hle and bios
+    rows differ). It never blocks, but a row that is *new* there deserves a ticket.
+  - The **improved** list is release-notes material for "Game compatibility" in
+    `docs/RELEASE_NOTES_vX.Y.Z.md`. Also account for any **added / removed** rows.
+  - Commit the regenerated docs on the release branch (`docs: regenerate cart + CD matrices for
+    vX.Y.Z`) so they ship with the tag.
+- CI on the release PR is green except `claude-review` (non-blocking; AI review service refuses diffs > 20k lines).
+- `docs/WHATSNEW` v`X.Y.Z` section is up-to-date.
+- `docs/RELEASE_NOTES_vX.Y.Z.md` exists. (See below for how to generate one.)
+- `src/core/version_fallback.h` `CORE_BASE_VERSION` matches the new tag (`scripts/check-info-version.sh` checks all three copies).
+- `dist/info/virtualjaguar_libretro.info` is up-to-date — `display_version` matches the new tag, any new feature flags are reflected (`savestate`, `cheats`, `disk_control`, `hw_render`, etc.).
+
+### 2. Tag
+
+```
+git tag -a v2.2.0 -m "v2.2.0"
+git push libretro v2.2.0
+```
+
+The push triggers `.github/workflows/release.yml` which runs only on `v*` tags.
+
+### 3. What `release.yml` does on tag push
+
+For each of the 14 matrix platforms (Linux x86_64/aarch64/i686, macOS arm64/x86_64, Windows x86_64/i686, Emscripten WASM, Android arm64-v8a/armeabi-v7a/x86_64/x86, iOS arm64, tvOS arm64), in parallel — PS Vita and Switch build in separate jobs, for 16 targets in total:
+
+1. Build the core with `RELEASE_DEBUG_INFO=1` so the optimized binary keeps `-g` symbols.
+2. Extract split debug info into a `<platform>-debug.tar.gz` archive (`objcopy --only-keep-debug` for ELF, `dsymutil` for Mach-O).
+3. Strip the shipped binary so it's small.
+4. Upload as a CI artifact.
+
+Two extra container-based jobs do PS Vita (`vitasdk/vitasdk:latest`) and Nintendo Switch (`devkitpro/devkita64:latest`). A parallel `jagcd-tools` job (`.github/workflows/chdman-tools.yml`) builds pinned `chdman` plus `jagcd-to-chd` / `jagcd-chd-check` for linux-x64, macOS, and windows-x64 — the same desktop trio as `cue2cdi`.
+
+After all platform builds finish, the `release` job:
+
+1. Collects every artifact into `release/`.
+2. Adds `dist/info/virtualjaguar_libretro.info` to `release/`.
+3. Generates `release/SHA256SUMS.txt` (sorted, `sha256sum -c` compatible).
+4. Reads `docs/RELEASE_NOTES_v<TAG>.md` if present and uses it as the release body, with the artifact list appended. Falls back to GitHub `--generate-notes` if no curated file is found.
+5. Creates the GitHub release with all of `release/*` attached.
+
+### 3b. Nightly builds (develop pushes)
+
+`release.yml` also fires on every push to `develop`. The build matrix is
+identical — the same 16 jobs (14 matrix entries + Vita + Switch) plus the jagcd-tools zips, the same split-debug packaging — but the
+publishing step is the `nightly` job instead of `release`:
+
+1. Moves the `nightly` git tag onto the pushed commit.
+2. Updates the single rolling `nightly` prerelease **in place**
+   (`gh release edit` + `gh release upload --clobber`, not delete-and-recreate,
+   so `/releases/tag/nightly` never 404s mid-run and the release keeps its id).
+   After the upload it briefly toggles draft→published so GitHub rewrites
+   `published_at` — plain `edit` leaves that stamp on the original create
+   date and the Releases page looks abandoned under newer stable tags.
+3. Rewrites `display_version` in the bundled `.info` to
+   `v<X.Y.Z>-nightly-<sha>`, so a nightly `.info` can never be mistaken for the
+   file that gets PR'd to libretro-super.
+4. Creates-or-updates a pinned tracking issue with the current build and
+   install instructions. Located by the `nightly-tracker` label first
+   (server-side, exact, independent of how many issues the repo has) with an
+   exact-title match as fallback — both have to miss before it could duplicate
+   itself.
+
+`workflow_dispatch` is also wired up, but **only to re-publish the nightly** —
+run it with the branch picker set to `develop`. GitHub defaults that picker to
+the repo default (`master`), and both publishing jobs are ref-gated, so a
+dispatch left on the default would build all 16 targets and publish nothing.
+The `guard` job rejects that in seconds instead of burning the matrix. To
+test-build an arbitrary branch, use `c-cpp.yml`, which has its own
+`workflow_dispatch` and runs on PRs.
+
+The two paths can't collide: the `release` job is gated on
+`startsWith(github.ref, 'refs/tags/v')`, the `nightly` job on
+`github.ref == 'refs/heads/develop'`, and the `nightly` tag deliberately sits
+outside the `v*` tag filter so a CI-pushed tag can never re-enter the release
+path.
+
+**What a nightly is gated on:** the 16 builds compiling. It is *not* gated on
+`c-cpp.yml`, the acid suite, or the screenshot regression run — those report
+separately on the same commit. A nightly can build cleanly and still be broken,
+and the release body says so. Upgrading that claim means switching the job to a
+`workflow_run` trigger (see `artifacts.yml` for the idiom in this repo).
+
+Concurrency differs from `c-cpp.yml`/`acid-test.yml` on purpose: develop pushes
+here **do** cancel superseded runs, because only the newest commit's binaries
+matter for a rolling prerelease. Tag pushes always run to completion. If build
+queue contention ever becomes a problem, the lever is a `paths-ignore` for
+docs-only pushes — not a smaller matrix. (Test it carefully: path filters
+interact badly with tag pushes, and this workflow serves both.)
+
+### 3c. Standalone app packages (#839)
+
+`release.yml`'s `app-packages` job calls the reusable `.github/workflows/app-package.yml`, which
+builds the desktop app in `app/` for macOS, Windows and Linux and uploads each platform's final
+files as an `app-package-<platform>` artifact. The `release` and `nightly` jobs flatten every
+artifact into `release/`, so the packages are checksummed into `SHA256SUMS.txt` and attached to
+the same GitHub release as the cores with no extra publishing logic. Nightly assets are replaced
+in place with `--clobber`, as before.
+
+| Asset | Contents |
+|---|---|
+| `VirtualJaguar-X.Y.Z-macos-universal.zip` | `Virtual Jaguar.app` (arm64 + x86_64), signed, notarized and stapled; the only macOS package (no DMG) and the Homebrew cask's download |
+| `VirtualJaguar-X.Y.Z-windows-x64.zip` | portable folder (`portable.txt` inside) |
+| `VirtualJaguar-X.Y.Z-windows-x64-setup.exe` | Inno Setup installer |
+| `VirtualJaguar-X.Y.Z-linux-x86_64.AppImage`, `...-linux-aarch64.AppImage` | AppImages |
+| `virtualjaguar_X.Y.Z_amd64.deb`, `virtualjaguar_X.Y.Z_arm64.deb` | Debian packages |
+
+`X.Y.Z` is the tag without its `v` (`v3.8.1-rc1` gives `3.8.1-rc1`). Nightlies use `nightly`
+(`VirtualJaguar-nightly-windows-x64.zip`) and the `release/**` lane uses `prerelease`.
+
+- **Version guard.** The app has no version of its own: `app/CMakeLists.txt` reads the core's
+  `CORE_BASE_VERSION` from the top-level `Makefile`, so bumping the core (the usual three places)
+  bumps the app, and every release tag ships app packages with the same number. The job still
+  checks that the tag's version (minus any `-suffix`) matches and skips with a warning if it does
+  not (a forgotten bump). A commit with no `app/` is skipped too.
+- **Gating.** A tagged release needs the app job to succeed (or be skipped); re-run the failed jobs
+  and the release follows. The nightly waits for it but does not require it, like the jagcd tools,
+  so an Apple notarization outage cannot withhold the core nightly.
+- **Signing** is optional and secret-driven (macOS Developer ID + notarization, Windows SignPath).
+  Every macOS file we ship is Developer ID signed and notarized: the app, the macOS core dylibs,
+  `cue2cdi-macos-universal` and the macOS chdman/jagcd tools (composite action
+  `.github/actions/macos-sign`); same-repo PR app packages are too. Without the secrets (fork PRs) the
+  macOS app is ad-hoc signed, everything else unsigned, and the log warns. A notarization failure fails
+  a tag build and only warns on other refs. The secrets, the
+  hardened-runtime reasoning and the manual steps are in [`app/packaging/README.md`](../app/packaging/README.md).
+- **After the release**, a maintainer fills the Homebrew, winget, Scoop and Flatpak templates from
+  the published `SHA256SUMS.txt` (`app/packaging/manifests/render.sh`) and submits them. CI never
+  submits to external repositories.
+
+### 4. Post-tag: update libretro-super
+
+RetroArch ships with a `.info` file per core, sourced from `libretro/libretro-super/dist/info/`. Update is **manual** — there's no automated mirror.
+
+```
+# Fork libretro-super, then:
+cd libretro-super
+git checkout master && git pull
+cp <this-repo>/dist/info/virtualjaguar_libretro.info dist/info/
+git checkout -b update-virtualjaguar-vX.Y.Z
+git add dist/info/virtualjaguar_libretro.info
+git commit -m "virtualjaguar: bump to vX.Y.Z"
+git push origin update-virtualjaguar-vX.Y.Z
+gh pr create --repo libretro/libretro-super \
+  --title "virtualjaguar: bump info to vX.Y.Z" \
+  --body  "Mirrors dist/info/virtualjaguar_libretro.info from
+libretro/virtualjaguar-libretro at tag vX.Y.Z.  Includes new
+savestate/cheats/cheevos flags now that the core supports them."
+```
+
+The libretro-super maintainers (typically @inactive123, @MrHuu, @aliaspider) merge these. The change appears in the next RetroArch update / shipped install.
+
+### 5. Generating release notes
+
+The `docs/RELEASE_NOTES_v<TAG>.md` file is written by hand (or with a sub-agent's help) before tagging. Recommended structure is in [`docs/RELEASE_NOTES_v2.2.0.md`](RELEASE_NOTES_v2.2.0.md) — Highlights, What's new (lifted from `docs/WHATSNEW`), Game compatibility summary, Known issues, "Compared to upstream" stats from `git shortlog -sn` and `git diff --shortstat libretro/master...HEAD`, Downloads list, Maintainers.
+
+For future releases (where there's a previous tag to diff against), use `git shortlog vPREV..HEAD` instead of `libretro/master..HEAD`.
+
+### Hotfix flow
+
+When a critical bug ships in a release and can't wait for the next `develop` cycle:
+
+```
+git checkout master && git pull
+git checkout -b hotfix/X.Y.Z+1
+# ... fix, bump CORE_BASE_VERSION patch, update RELEASE_NOTES, commit ...
+gh pr create --base master --title "hotfix: <issue>" --body "Fixes #N.  Bumps to vX.Y.Z+1."
+# After merge:
+git tag vX.Y.Z+1 && git push libretro vX.Y.Z+1
+git checkout develop && git pull && git merge master && git push libretro develop
+```
+
+The `hotfix/*` source branch suppresses the warn-on-master-PR workflow.
+
+### 6. If a release-job step fails
+
+The workflow runs only on `v*` tag push, but the `release` job is re-runnable from the [Actions tab](https://github.com/libretro/virtualjaguar-libretro/actions) without needing a new tag. Common failure modes:
+
+- **A platform build broke** (compiler upgrade, NDK version drift): re-run from Actions, or fix and push a new tag `vX.Y.Z+1`.
+- **`gh release create` 422'd because the tag already has a release**: delete the partial release in the GitHub UI and re-run the `release` job.
+- **`objcopy` not found on a less-tested platform** (Vita, Switch): the workflow uses `|| cp` fallbacks so the build succeeds with an unsplit debug archive; the binary itself ships fine.
+
+### 7. Artifact naming
+
+Each binary follows `virtualjaguar_libretro-<platform>.<ext>`:
+
+```
+virtualjaguar_libretro-linux-x86_64.so
+virtualjaguar_libretro-linux-x86_64-debug.tar.gz
+virtualjaguar_libretro-macos-arm64.dylib
+virtualjaguar_libretro-macos-arm64-debug.tar.gz   # contains a .dSYM bundle
+virtualjaguar_libretro-windows-x86_64.dll
+virtualjaguar_libretro-windows-x86_64-debug.tar.gz
+virtualjaguar_libretro-android-arm64-v8a.so
+virtualjaguar_libretro-emscripten-wasm.bc
+virtualjaguar_libretro-ios-arm64.dylib
+virtualjaguar_libretro-tvos-arm64.dylib
+virtualjaguar_libretro-vita.a
+virtualjaguar_libretro-switch.a
+SHA256SUMS.txt
+virtualjaguar_libretro.info
+```
+
+The `.info` file in the release is the same one that should land in libretro-super.

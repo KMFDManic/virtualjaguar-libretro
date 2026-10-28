@@ -1,0 +1,3720 @@
+DEBUG = 0
+
+SPACE :=
+SPACE := $(SPACE) $(SPACE)
+BACKSLASH :=
+BACKSLASH := \$(BACKSLASH)
+filter_out1 = $(filter-out $(firstword $1),$1)
+filter_out2 = $(call filter_out1,$(call filter_out1,$1))
+unixpath = $(subst \,/,$1)
+unixcygpath = /$(subst :,,$(call unixpath,$1))
+
+ifeq ($(platform),)
+	platform = unix
+	ifeq ($(shell uname -a),)
+		platform = win
+	else ifneq ($(findstring Darwin,$(shell uname -a)),)
+		platform = osx
+		arch = intel
+		ifeq ($(shell uname -p),powerpc)
+			arch = ppc
+		endif
+	        ifeq ($(shell uname -p),arm)
+	        	arch = arm
+	        endif
+	else ifneq ($(findstring MINGW,$(shell uname -a)),)
+		platform = win
+	endif
+endif
+
+# Optimisation level for release builds (ignored when DEBUG=1, and not used
+# by the MSVC branches, whose -O2 means something else entirely).
+#
+# MEASURED: macOS arm64, where -O3 is worth +5.5% (two interleaved A/B runs,
+# n=16 per arm, p ~ 0.025) for +49 KB of __TEXT, full test suite green.  See
+# issue #515, which also records the protocol, because the naive sequential
+# A/B reports +12.5% on a loaded host and is wrong by a sign.
+#
+# osx / ios-arm64 / ios9 / tvos-arm64 are that measurement plus the same
+# clang and the same architecture.
+#
+# unix / win are NOT covered by it -- GCC on x86_64 is a different compiler
+# and a different target.  They are enabled on the weaker grounds that they
+# are desktops with CPU headroom to spare, where a regression is cheap to
+# notice and cheap to revert.  If that bothers you, measure them; the
+# protocol on #515 is the whole recipe.
+#
+# Vita, Switch, 3DS, PSP and emscripten stay at -O2 deliberately: different
+# compilers again, and the Vita has real memory limits, so neither result
+# above says anything about them.  Measure before adding one.
+#
+# The rpi* targets are here by maintainer decision rather than by the
+# measurement protocol above: the Pi platform names identify the silicon
+# exactly, and every one of them is a small in-order or narrow out-of-order
+# core with no headroom to spare, which is the case -O3 helps most.  The
+# closest evidence we have is the +5.5% measured on macOS arm64 (#515) --
+# same ISA family, different compiler.  Re-measure on real hardware when a
+# Pi is available; test/tools/rpi_perf.sh exists for exactly that.
+#
+# -Ofast was considered and REJECTED for these.  Its headline implication is
+# -ffast-math, which #517 measured at ~0% here (the hot loops are integer;
+# the only floating point is a SAVESTATED I2S resampler and event
+# scheduling) and then removed globally as a latent determinism hazard.
+# Determinism is load-bearing in this tree -- run-ahead (#400), netplay, and
+# savestate compatibility all depend on it -- so -Ofast would reintroduce
+# exactly what #517 took out, for a measured-zero gain, on a platform people
+# run netplay on.  `make OPT_LEVEL=-Ofast platform=rpi4` still works if you
+# want to measure it.
+#
+# Override on the command line to test: `make OPT_LEVEL=-O2`.
+OPT_O3_PLATFORMS := unix osx win ios-arm64 ios9 tvos-arm64 \
+                    rpi0 rpi1 rpi2 rpi3 rpi3_64 rpi4 rpi4_64 rpi5 rpi5_64
+# classic_armv7_a7 asks for -Ofast in its own platform block and always has.
+# It never took effect: the shared release branch appended -O2 afterwards and
+# the last -O wins, so the target silently built at -O2 (issue #516).  The
+# level is resolved here instead, where it is both effective and stamped.
+#
+# NOTE (issue #517): -Ofast's headline implication is -ffast-math, which
+# used to be applied unconditionally to every non-MSVC build further down
+# and so added no new semantics here.  #517's audit measured that global
+# -ffast-math at ~0% (integer-only hot loops) and removed it everywhere
+# else as a latent determinism hazard.  classic_armv7_a7 was left alone at
+# the time, which left it as the only platform in the tree still shipping
+# -ffast-math.
+#
+# It is now cancelled here too (issue #633), via the -Ofast -fno-fast-math
+# last-wins form the previous revision of this comment already described.
+# -Ofast's other -O3-family optimizations are kept; only the fast-math half
+# goes away.  Three reasons, none of them a measured slowdown:
+#
+#   * #517's own premise was wrong about the blast radius.  It described the
+#     tree's floating point as "a savestated I2S resampler and
+#     event-scheduling code".  There is float arithmetic in sixteen source
+#     files, and the two largest are src/jerry/dac.c (the resampler) and
+#     src/core/event.c -- the event scheduler, i.e. machine timing itself.
+#   * Determinism is load-bearing here: run-ahead (#400), netplay and
+#     savestate compatibility all depend on it, and this is a platform
+#     people run netplay on.  dac.c's i2sPhase read cursor is savestated, so
+#     reassociated rounding there is a savestate-divergence hazard, not just
+#     an audio one.
+#   * A user-reported "parasitic noise during gameplay" on buildbot builds
+#     (#633) has no repro on any platform that dropped the flag in #517.
+#     i2sPhase is a double phase accumulator stepped per sample; -ffast-math
+#     reassociation and FMA contraction change how it rounds on every step.
+#     Unproven -- this repo has no ARMv7 hardware to listen on -- but it is
+#     the only structural difference between the platforms that report it
+#     and the ones that do not.
+#
+# The gain being given up was measured at ~0% and the hot loops are integer,
+# so there is nothing here for fast-math to buy.  A per-file
+# `src/jerry/dac.o: CFLAGS += -fno-fast-math` was considered and rejected as
+# too narrow: it leaves the scheduler exposed, and -ffast-math is not purely
+# per-TU anyway (at link time it can pull in crtfastmath.o, which sets
+# FTZ/DAZ process-wide).  Revisit per-file scoping only if fast-math is ever
+# measured to pay for itself somewhere specific.
+OPT_OFAST_PLATFORMS := classic_armv7_a7
+ifeq ($(origin OPT_LEVEL),undefined)
+   ifneq ($(filter $(platform),$(OPT_OFAST_PLATFORMS)),)
+      OPT_LEVEL := -Ofast -fno-fast-math
+   else ifneq ($(filter $(platform),$(OPT_O3_PLATFORMS)),)
+      OPT_LEVEL := -O3
+   else
+      OPT_LEVEL := -O2
+   endif
+endif
+
+# LTO default.  Resolved here (before BUILD_AXES) so the stamp records the
+# effective value, not the empty command-line origin.
+#
+# GNU-ld ELF targets (unix, rpi*, generic arm64/aarch64/armv*) default ON;
+# opt out with LTO=0.  win (PE/COFF) and qnx (unverified gcc floor) stay off.
+# Mach-O (osx/ios/tvos) stays off unless LTO=1 is passed explicitly -- Apple
+# ld64 LTO is a different pipeline than the #569 ELF GOT/PLT win, and host
+# A/B numbers are indicative only.  classic_armv7_a7 is not in this list: it
+# already runs its own -flto=4 -fwhole-program pipeline.
+#
+# The FLAGS append is still gated on GC_STYLE below; this only picks the
+# default so `make` and `make LTO=1` stamp the same on unix/rpi*.
+LTO_DEFAULT_PLATFORMS := unix rpi0 rpi1 rpi2 rpi3 rpi3_64 rpi4 rpi4_64 rpi5 rpi5_64 \
+                         arm64 aarch64
+ifeq ($(origin LTO),undefined)
+   ifneq ($(filter $(platform),$(LTO_DEFAULT_PLATFORMS)),)
+      LTO := 1
+   else ifneq (,$(filter armv%,$(platform)))
+      LTO := 1
+   else
+      LTO := 0
+   endif
+endif
+
+# gcov + -flto is known-broken on GCC: the computed-goto dispatch tables in
+# dsp.c/gpu.c become .data.rel.local arrays of .L label addresses, and the
+# coverage instrumentation strands those local symbols across LTO partitions
+# ("undefined reference to `.L106'" at link).  Coverage wants unmerged,
+# per-line attribution anyway, so force LTO off -- even over an explicit
+# LTO=1 -- whenever COVERAGE=1.
+ifeq ($(COVERAGE),1)
+   override LTO := 0
+endif
+
+# Opt-in iOS -mcpu pin.  Empty by default: stock ios-arm64 is -mtune only
+# (ISA-safe for the RetroArch iOS 9 / A7 floor).  For an iOS 17+ deploy
+# that can assume A12+: `make platform=ios-arm64 IOS_MCPU=apple-a12`.
+# MUST stay in BUILD_AXES -- it changes object content.
+IOS_MCPU ?=
+
+# system platform
+system_platform = unix
+ifeq ($(shell uname -a),)
+	EXE_EXT = .exe
+	system_platform = win
+else ifneq ($(findstring Darwin,$(shell uname -a)),)
+	system_platform = osx
+	arch = intel
+	ifeq ($(shell uname -p),powerpc)
+		arch = ppc
+	endif
+else ifneq ($(findstring MINGW,$(shell uname -a)),)
+	system_platform = win
+endif
+
+TARGET_NAME := virtualjaguar
+
+# Single source-of-truth for the human-readable version string.
+# Bumped by .github/workflows/version-bump.yml (greps this line).
+# Composed into CORE_VERSION in src/core/version.h, generated below.
+CORE_BASE_VERSION := v3.10.0
+
+ifeq ($(DEBUG),1)
+   CFLAGS += -DBUILD_TIMESTAMP="\"debug $(shell date -u +%Y-%m-%dT%H:%M:%SZ)\""
+endif
+
+# Opt-in instrumentation counters (src/core/perf_counters.h).
+# `make BENCH_PROFILE=1` defines the macro so PERF_COUNTER/PERF_INC
+# emit real code; otherwise every counter macro is a no-op.
+ifeq ($(BENCH_PROFILE),1)
+   CFLAGS += -DBENCH_PROFILE
+endif
+
+# Per-blit slow-path tracing in BlitterMidsummer2.
+# `make BLITTER_TRACE=1` enables an stderr dump of any single blit
+# whose wall time exceeds ~1.5 ms (configurable via the threshold in
+# src/tom/blitter.c).  Useful for finding pathological blit commands
+# that dominate frame-time variance.  macOS-only (uses mach_*).
+ifeq ($(BLITTER_TRACE),1)
+   CFLAGS += -DBLITTER_TRACE
+endif
+
+# Symbol export gating.
+#
+#   GNU ld (Linux, Windows MSYS2, ARM, ...) honours --version-script:
+#     link.T       : production ABI (retro_* only).
+#     link-test.T  : wide symbol set used by white-box test harnesses.
+#
+#   Mach-O ld64 (macOS / iOS / tvOS) ignores --version-script; it uses
+#   -exported_symbols_list instead:
+#     exports.list       : production retro_* only.
+#     exports-test.list  : wide test ABI (mirrors link-test.T).
+#
+# The `test` target re-invokes make with TEST_EXPORTS=1 so the shipped
+# library on default `make` hides internals, while `make test` produces
+# a library the test binaries can dlsym into.  Static archives ignore
+# both mechanisms and still export everything with default visibility.
+ifeq ($(TEST_EXPORTS),1)
+LINK_SCRIPT := link-test.T
+MACHO_EXPORTS := exports-test.list
+CFLAGS += -DVJ_TRACE
+else
+LINK_SCRIPT := link.T
+MACHO_EXPORTS := exports.list
+endif
+MACHO_EXPORTS_FLAGS := -Wl,-exported_symbols_list,$(MACHO_EXPORTS)
+
+# Benchmark-only: compile OUT the GDB stub's per-instruction hook checks.
+#
+# The stub ships enabled-by-default-off, and that decision rests on the
+# armed-counter check costing nothing when no breakpoint is set (issue #652,
+# docs/gdb-stub-design.md).  That is a measurable claim, so it needs a
+# measurable control arm:
+#
+#   test/tools/opt_ab.sh 'VJ_GDB_STUB_DISABLE_HOOKS=0' \
+#                        'VJ_GDB_STUB_DISABLE_HOOKS=1' 12
+#
+# NEVER ship a build with this set -- it silently removes breakpoint
+# detection from all three processors.  It exists so the A/B is
+# reproducible; the first measurement was taken with an equivalent local
+# edit that was reverted afterwards, which left the number unverifiable.
+#
+# Passing CFLAGS=... on the command line instead does not work here: a
+# command-line assignment blocks every later `+=` in this Makefile, silently
+# dropping the -I/-D flags the build needs.
+ifeq ($(VJ_GDB_STUB_DISABLE_HOOKS),1)
+CFLAGS += -DVJ_GDB_STUB_DISABLE_HOOKS
+endif
+
+# Finer control arm: removes ONLY the idle-skip interaction
+# (`if (gdbArmed*) idleSkipActive = 0;`), leaving the per-instruction PC
+# checks in place, so the two halves of the hook cost can be told apart.
+#
+# The backslash-continuation must NOT sit inside the $(...): make would read
+# the whole thing as ONE variable reference named "VJ_GDB_STUB_DISABLE_IDLE_GATE
+# VJ_GDB_STUB_DISABLE_68K_HOOK VJ_GDB_STUB_DISABLE_DSP_HOOK", which does not
+# exist, expands empty, and leaves the macro undefined for every value of
+# every one of those three variables -- an inert control arm that produces a
+# byte-identical binary in both of its A/B arms and therefore a guaranteed
+# null result.  (That is exactly how it shipped, and how the "idle-skip
+# gating costs ~0%" row got recorded; the two names below belong in
+# BUILD_AXES, which is where they have now been put.)
+ifeq ($(VJ_GDB_STUB_DISABLE_IDLE_GATE),1)
+CFLAGS += -DVJ_GDB_STUB_DISABLE_IDLE_GATE
+endif
+
+# Per-processor control arms, so the hook cost can be attributed to one
+# processor at a time (issue #652).  Used to establish that the 68K hook
+# and the idle-skip gating both cost nothing and the residual is the DSP.
+ifeq ($(VJ_GDB_STUB_DISABLE_68K_HOOK),1)
+CFLAGS += -DVJ_GDB_STUB_DISABLE_68K_HOOK
+endif
+ifeq ($(VJ_GDB_STUB_DISABLE_DSP_HOOK),1)
+CFLAGS += -DVJ_GDB_STUB_DISABLE_DSP_HOOK
+endif
+
+# Records the build configuration the objects in the tree were last
+# compiled under; see the mode-switch hook next to the link rule below.
+#
+# Every variable listed here changes how objects are COMPILED (or which
+# symbols survive the link), so flipping any one of them invalidates
+# every existing .o.  Adding a new such switch means adding it here --
+# that is the whole maintenance burden, and forgetting costs a silent
+# chimera binary rather than a build error.
+#
+# It is deliberately a list of *variable names* and not $(CFLAGS)
+# itself.  Stamping the flags would look more future-proof but breaks
+# on DEBUG=1, whose CFLAGS carry a -DBUILD_TIMESTAMP that changes every
+# second: the stamp would never match and every single build would
+# flush the tree.  Values here are plain tokens (1, or a platform
+# name), so the comparison also stays free of shell quoting hazards --
+# CFLAGS contains -DINLINE="inline".
+BUILD_AXES := TEST_EXPORTS BENCH_PROFILE DEBUG BLITTER_TRACE COVERAGE \
+              RELEASE_DEBUG_INFO DEBUG_PRESENTATION STATIC_LINKING platform \
+              OPT_LEVEL LTO IOS_MCPU VJ_GDB_STUB_DISABLE_HOOKS \
+              VJ_GDB_STUB_DISABLE_IDLE_GATE VJ_GDB_STUB_DISABLE_68K_HOOK \
+              VJ_GDB_STUB_DISABLE_DSP_HOOK
+BUILD_CONFIG := $(strip $(foreach v,$(BUILD_AXES),$(v)=$($(v))))
+BUILD_CONFIG_STAMP := .build-config
+# Superseded .link-mode, which tracked TEST_EXPORTS alone; removed by the
+# hook below so a tree built before this change doesn't keep a dead file.
+LEGACY_LINK_MODE_STAMP := .link-mode
+
+# Unix
+ifeq ($(platform), unix)
+	TARGET := $(TARGET_NAME)_libretro.so
+	fpic := -fPIC
+	ifneq ($(findstring SunOS,$(shell uname -a)),)
+		# Solaris ld: no --gc-sections, so GC_STYLE stays unset.
+		SHARED := -shared -z defs -z gnu-version-script-compat
+	else
+		SHARED := -shared -Wl,--no-undefined -Wl,--version-script=$(LINK_SCRIPT)
+		GC_STYLE := gnu
+	endif
+
+# Classic Platforms ####################
+# Platform affix = classic_<ISA>_<µARCH>
+# Help at https://modmyclassic.com/comp
+
+# (armv7 a7, hard point, neon based) ###
+# NESC, SNESC, C64 mini
+else ifeq ($(platform), classic_armv7_a7)
+	TARGET := $(TARGET_NAME)_libretro.so
+	fpic := -fPIC
+	SHARED := -shared -Wl,--no-undefined -Wl,--version-script=$(LINK_SCRIPT)
+	# --gc-sections belongs on the link line, not in CFLAGS; see the
+	# GC_STYLE block below for why this target sets it by hand.
+	LDFLAGS += -Wl,--gc-sections
+	# -Ofast lives in OPT_LEVEL above, not here -- see issue #516.
+	CFLAGS += -flto=4 -fwhole-program -fuse-linker-plugin \
+	-fdata-sections -ffunction-sections \
+	-fno-stack-protector -fno-ident -fomit-frame-pointer \
+	-falign-functions=1 -falign-jumps=1 -falign-loops=1 \
+	-fno-unwind-tables -fno-asynchronous-unwind-tables -fno-unroll-loops \
+	-fmerge-all-constants -fno-math-errno \
+	-marm -mtune=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard
+	CXXFLAGS += $(CFLAGS)
+	HAVE_NEON = 1
+	ARCH = arm
+	ifeq ($(shell echo `$(CC) -dumpversion` "< 4.9" | bc -l), 1)
+	  CFLAGS += -march=armv7-a
+	else
+	  CFLAGS += -march=armv7ve
+	  # If gcc is 5.0 or later
+	  ifeq ($(shell echo `$(CC) -dumpversion` ">= 5" | bc -l), 1)
+	    LDFLAGS += -static-libgcc -static-libstdc++
+	  endif
+	endif
+#######################################
+
+# OSX
+else ifeq ($(platform), osx)
+	TARGET := $(TARGET_NAME)_libretro.dylib
+	fpic := -fPIC
+	SHARED := -dynamiclib $(MACHO_EXPORTS_FLAGS)
+	GC_STYLE := macho
+	ifeq ($(arch),ppc)
+		FLAGS += -DMSB_FIRST
+		OLD_GCC = 1
+	endif
+	OSXVER = `sw_vers -productVersion | cut -d. -f 2`
+	OSX_LT_MAVERICKS = `(( $(OSXVER) <= 9)) && echo "YES"`
+ifeq ($(OSX_LT_MAVERICKS),YES)
+	fpic += -mmacosx-version-min=10.1
+endif
+
+   ifeq ($(CROSS_COMPILE),1)
+		TARGET_RULE   = -target $(LIBRETRO_APPLE_PLATFORM) -isysroot $(LIBRETRO_APPLE_ISYSROOT)
+		CFLAGS   += $(TARGET_RULE)
+		CPPFLAGS += $(TARGET_RULE)
+		CXXFLAGS += $(TARGET_RULE)
+		LDFLAGS  += $(TARGET_RULE)
+   endif
+
+	CFLAGS  += $(ARCHFLAGS)
+	CXXFLAGS  += $(ARCHFLAGS)
+	LDFLAGS += $(ARCHFLAGS)
+
+# iOS
+else ifneq (,$(findstring ios,$(platform)))
+	TARGET := $(TARGET_NAME)_libretro_ios.dylib
+	fpic := -fPIC
+	SHARED := -dynamiclib $(MACHO_EXPORTS_FLAGS)
+	GC_STYLE := macho
+	MINVERSION :=
+	ifeq ($(IOSSDK),)
+		IOSSDK := $(shell xcodebuild -version -sdk iphoneos Path)
+	endif
+ifeq ($(platform),ios-arm64)
+   CC = cc -arch arm64 -isysroot $(IOSSDK)
+   CXX = clang++ -arch arm64 -isysroot $(IOSSDK)
+   # ISA-safe schedule model.  RetroArch's ios-arm64 floor is iOS 9 = A7;
+   # -mtune does not change the ISA so A7 devices still run the binary.
+   # Do NOT default -mcpu: apple-a10+ emits CRC32, apple-a11+ emits LSE,
+   # and either SIGILLs on A7/A8/A9.  Opt in for iOS 17+ deploys:
+   #   make platform=ios-arm64 IOS_MCPU=apple-a12
+   CFLAGS += -mtune=apple-a10
+   CXXFLAGS += -mtune=apple-a10
+   ifneq ($(IOS_MCPU),)
+      CFLAGS += -mcpu=$(IOS_MCPU)
+      CXXFLAGS += -mcpu=$(IOS_MCPU)
+   endif
+else
+   CC = cc -arch armv7 -isysroot $(IOSSDK)
+   CXX = clang++ -arch armv7 -isysroot $(IOSSDK)
+endif
+ifeq ($(platform),$(filter $(platform),ios9 ios-arm64))
+	MINVERSION = -miphoneos-version-min=8.0
+else
+	MINVERSION = -miphoneos-version-min=5.0
+endif
+        SHARED += $(MINVERSION)
+        CFLAGS += $(MINVERSION)
+
+else ifeq ($(platform), tvos-arm64)
+# tvOS
+	TARGET := $(TARGET_NAME)_libretro_tvos.dylib
+	fpic := -fPIC
+	SHARED := -dynamiclib $(MACHO_EXPORTS_FLAGS)
+	GC_STYLE := macho
+	ifeq ($(IOSSDK),)
+		IOSSDK := $(shell xcodebuild -version -sdk appletvos Path)
+	endif
+        CC = cc -arch arm64 -isysroot $(IOSSDK)
+        CXX = clang++ -arch arm64 -isysroot $(IOSSDK)
+        MINVERSION = -mappletvos-version-min=11.0
+        # ISA-safe schedule model for Apple TV HD (A8), the tvOS floor.
+        # -mcpu is forbidden here: apple-a10+ emits CRC32 => SIGILL on A8.
+        CFLAGS += -mtune=apple-a8
+        CXXFLAGS += -mtune=apple-a8
+        SHARED += $(MINVERSION)
+        CFLAGS += $(MINVERSION)
+
+# Theos
+else ifeq ($(platform), theos_ios)
+	DEPLOYMENT_IOSVERSION = 5.0
+	TARGET = iphone:latest:$(DEPLOYMENT_IOSVERSION)
+	ARCHS = armv7 armv7s
+	TARGET_IPHONEOS_DEPLOYMENT_VERSION=$(DEPLOYMENT_IOSVERSION)
+	THEOS_BUILD_DIR := objs
+	include $(THEOS)/makefiles/common.mk
+	LIBRARY_NAME = $(TARGET_NAME)_libretro_ios
+
+# QNX
+else ifeq ($(platform), qnx)
+	TARGET := $(TARGET_NAME)_libretro_$(platform).so
+	fpic := -fPIC
+	SHARED := -shared -Wl,--no-undefined -Wl,--version-script=$(LINK_SCRIPT)
+	GC_STYLE := gnu
+	CC = qcc -Vgcc_ntoarmv7le
+	CXX = QCC -Vgcc_ntoarmv7le_cpp
+
+# ARM
+# Generic ARM64 Linux.  Same defect as the rpi* names below: `arm64` matched
+# no branch in this chain and fell through to the Windows fallback, so it
+# built a .dll against -lwinmm (issue #560).  Its SIMD selection was already
+# correct -- Makefile.common matches `arm64` by platform name -- which is
+# exactly why this went unnoticed: the blitter looked right in a variable
+# dump while the link line was for the wrong OS.
+else ifneq (,$(filter arm64 aarch64,$(platform)))
+	TARGET := $(TARGET_NAME)_libretro.so
+	fpic := -fPIC
+	SHARED := -shared -Wl,--no-undefined -Wl,--version-script=$(LINK_SCRIPT)
+	GC_STYLE := gnu
+	ARCH = aarch64
+
+# Raspberry Pi.  These are the names libretro-super passes.  Before issue
+# #560 this project had no branch for any of them, so they fell all the way
+# through to the *Windows* fallback at the end of this chain and built
+# `virtualjaguar_libretro.dll` linked against -lwinmm -lws2_32.  Scalar SIMD
+# was the least of it.
+#
+# The 32-bit names describe the userland, not the silicon: rpi2..rpi5 are all
+# NEON-capable running a 32-bit OS, but rpi1 and rpi0 are ARMv6 (ARM1176) with
+# no NEON at all, so they are deliberately absent from the NEON list.
+#
+# PER-SOC TUNING.  Unlike a generic ARM target, a Raspberry Pi platform name
+# identifies the silicon exactly, so -mcpu is a statement of fact rather than
+# a guess -- which is why these get it and `unix`/`armv7-*` do not.
+#
+#   rpi0 rpi1   BCM2835   ARM1176JZF-S  ARMv6 + VFPv2, NO NEON
+#   rpi2        BCM2836   Cortex-A7     ARMv7-A + NEON-VFPv4
+#   rpi3        BCM2837   Cortex-A53    ARMv8-A, 32-bit userland
+#   rpi4        BCM2711   Cortex-A72    ARMv8-A, 32-bit userland
+#   rpi5        BCM2712   Cortex-A76    ARMv8.2-A, 32-bit userland
+#   *_64        same parts, aarch64 userland
+#
+# -mcpu implies -mtune, so both are never passed.  -mfpu/-mfloat-abi are
+# 32-bit-ARM-only options -- aarch64 gcc ERRORS on them -- so they are gated
+# on the same 64-bit split as ARCH below, not appended blindly.
+#
+# rpi2 is the ambiguous one: board revision 1.2 shipped a BCM2837 (A53), but
+# the libretro `rpi2` name conventionally means the original A7 part, and A7
+# code runs on an A53 while the reverse is not true.  Kept at A7 on purpose.
+#
+# -O3 comes from OPT_O3_PLATFORMS at the top of this file, NOT from here --
+# see the #516 note there.  Appending an -O to CFLAGS in a platform block is
+# exactly the bug that made classic_armv7_a7 silently build at -O2 for years.
+else ifneq (,$(filter rpi0 rpi1 rpi2 rpi3 rpi3_64 rpi4 rpi4_64 rpi5 rpi5_64,$(platform)))
+	TARGET := $(TARGET_NAME)_libretro.so
+	fpic := -fPIC
+	SHARED := -shared -Wl,--no-undefined -Wl,--version-script=$(LINK_SCRIPT)
+	GC_STYLE := gnu
+	ifneq (,$(filter rpi0 rpi1,$(platform)))
+		RPI_MCPU := arm1176jzf-s
+	else ifeq ($(platform),rpi2)
+		RPI_MCPU := cortex-a7
+	else ifneq (,$(filter rpi3 rpi3_64,$(platform)))
+		RPI_MCPU := cortex-a53
+	else ifneq (,$(filter rpi4 rpi4_64,$(platform)))
+		RPI_MCPU := cortex-a72
+	else
+		RPI_MCPU := cortex-a76
+	endif
+	CFLAGS += -mcpu=$(RPI_MCPU)
+	ifneq (,$(filter rpi3_64 rpi4_64 rpi5_64,$(platform)))
+		ARCH = aarch64
+	else
+		ARCH = arm
+		# 32-bit only.  ARMv6 parts get plain VFP; everything else NEON, in
+		# the encoding its ISA level actually provides.
+		ifneq (,$(filter rpi0 rpi1,$(platform)))
+			# -marm is REQUIRED here, not a tuning choice.  Debian's armhf
+			# cross toolchain is --with-arch=armv7-a+fp and defaults to
+			# Thumb; ARMv6 has only Thumb-1, and GCC cannot pair Thumb-1
+			# with the hard-float VFP ABI:
+			#     sorry, unimplemented: Thumb-1 'hard-float' VFP ABI
+			# A native Pi 1 compiler defaults to ARM mode and never shows
+			# this, so it only bites cross-builds -- i.e. CI.  Verified in
+			# an arm-linux-gnueabihf container; A7/A53/A72/A76 build fine
+			# either way and are left on the Thumb-2 default.
+			CFLAGS += -marm -mfpu=vfp -mfloat-abi=hard
+		else ifeq ($(platform),rpi2)
+			CFLAGS += -mfpu=neon-vfpv4 -mfloat-abi=hard
+			HAVE_NEON = 1
+		else
+			CFLAGS += -mfpu=neon-fp-armv8 -mfloat-abi=hard
+			HAVE_NEON = 1
+		endif
+	endif
+	CXXFLAGS += $(CFLAGS)
+
+else ifneq (,$(findstring armv,$(platform)))
+	TARGET := $(TARGET_NAME)_libretro.so
+	fpic := -fPIC
+	SHARED := -shared -Wl,--no-undefined -Wl,--version-script=$(LINK_SCRIPT)
+	GC_STYLE := gnu
+	ARCH = arm
+	# A platform name that says "neon" is a promise about the target, and
+	# it is the only NEON signal these generic armv* names carry: ARCH=arm
+	# above matches none of the aarch64/arm64 rules in Makefile.common, so
+	# armv7-neon-hardfloat built the SCALAR blitter (issue #560).  Plain
+	# armv7/armv6 names stay scalar -- ARMv7's baseline is VFP, not NEON.
+	ifneq (,$(findstring neon,$(platform)))
+		HAVE_NEON = 1
+	endif
+
+# Nintendo Switch (libnx)
+else ifeq ($(platform), libnx)
+	include $(DEVKITPRO)/libnx/switch_rules
+	TARGET := $(TARGET_NAME)_libretro_$(platform).a
+	DEFINES := -DSWITCH=1 -D__SWITCH__
+	CFLAGS := $(DEFINES) -fPIE -I$(LIBNX)/include/ -ffunction-sections -fdata-sections -ftls-model=local-exec -specs=$(LIBNX)/switch.specs
+	# -ffast-math dropped here too (issue #517): the hot loops it could
+	# possibly speed up are integer-only regardless of target architecture,
+	# so the x86_64/arm64 A/B null result (see the FLAGS block below)
+	# generalizes here without needing a Switch-specific measurement.
+	# -mcpu implies -mtune, so a separate -mtune=cortex-a57 was redundant.
+	CFLAGS += -march=armv8-a -mtp=soft -mcpu=cortex-a57+crc+fp+simd
+	CXXFLAGS := $(ASFLAGS) $(CFLAGS)
+	STATIC_LINKING = 1
+
+# Lightweight PS3 Homebrew SDK
+else ifneq (,$(filter $(platform), ps3 psl1ght))
+	TARGET := $(TARGET_NAME)_libretro_$(platform).a
+	CC = $(PS3DEV)/ppu/bin/ppu-$(COMMONLV)gcc$(EXE_EXT)
+	CXX = $(PS3DEV)/ppu/bin/ppu-$(COMMONLV)g++$(EXE_EXT)
+	AR = $(PS3DEV)/ppu/bin/ppu-$(COMMONLV)ar$(EXE_EXT)
+	STATIC_LINKING = 1
+	FLAGS += -DMSB_FIRST -D__PS3__
+	OLD_GCC = 1
+	ifeq ($(platform), psl1ght)
+		FLAGS += -D__PSL1GHT__
+	endif
+
+# PSP
+else ifeq ($(platform), psp1)
+	TARGET := $(TARGET_NAME)_libretro_$(platform).a
+	CC = psp-gcc$(EXE_EXT)
+	CXX = psp-g++$(EXE_EXT)
+	AR = psp-ar$(EXE_EXT)
+	STATIC_LINKING = 1
+	FLAGS += -G0
+
+# Vita
+else ifeq ($(platform), vita)
+	TARGET := $(TARGET_NAME)_libretro_$(platform).a
+	CC = arm-vita-eabi-gcc$(EXE_EXT)
+	CXX = arm-vita-eabi-g++$(EXE_EXT)
+	AR = arm-vita-eabi-ar$(EXE_EXT)
+	STATIC_LINKING = 1
+	FLAGS += -DVITA
+
+# CTR (3DS)
+else ifeq ($(platform), ctr)
+	TARGET := $(TARGET_NAME)_libretro_$(platform).a
+	CC = $(DEVKITARM)/bin/arm-none-eabi-gcc$(EXE_EXT)
+	CC = $(DEVKITARM)/bin/arm-none-eabi-g++$(EXE_EXT)
+	AR = $(DEVKITARM)/bin/arm-none-eabi-ar$(EXE_EXT)
+   STATIC_LINKING = 1
+   FLAGS += -D_3DS
+
+# Switch (libtransistor)
+else ifeq ($(platform), switch)
+	TARGET := $(TARGET_NAME)_libretro_switch.a
+	include $(LIBTRANSISTOR_HOME)/libtransistor.mk
+	STATIC_LINKING=1
+	fpic := -nostdlib
+
+# emscripten (WebAssembly / asm.js for RetroArch Web Player)
+else ifeq ($(platform), emscripten)
+	TARGET := $(TARGET_NAME)_libretro_$(platform).bc
+	CC = emcc
+	CXX = em++
+	AR = emar
+	STATIC_LINKING = 1
+	FLAGS += -DHAVE_EMSCRIPTEN
+
+# Windows MSVC 2017 all architectures
+else ifneq (,$(findstring windows_msvc2017,$(platform)))
+
+	PlatformSuffix = $(subst windows_msvc2017_,,$(platform))
+	ifneq (,$(findstring desktop,$(PlatformSuffix)))
+		WinPartition = desktop
+		MSVC2017CompileFlags = -DWINAPI_FAMILY=WINAPI_FAMILY_DESKTOP_APP -FS
+		LDFLAGS += -MANIFEST -LTCG:incremental -NXCOMPAT -DYNAMICBASE -DEBUG -OPT:REF -INCREMENTAL:NO -SUBSYSTEM:WINDOWS -MANIFESTUAC:"level='asInvoker' uiAccess='false'" -OPT:ICF -ERRORREPORT:PROMPT -NOLOGO -TLBID:1
+		#LIBS += kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib
+	else ifneq (,$(findstring uwp,$(PlatformSuffix)))
+		WinPartition = uwp
+		MSVC2017CompileFlags = -DWINAPI_FAMILY=WINAPI_FAMILY_APP -DWINDLL -D_UNICODE -DUNICODE -DWRL_NO_DEFAULT_LIB -FS
+		LDFLAGS += -APPCONTAINER -NXCOMPAT -DYNAMICBASE -MANIFEST:NO -LTCG -OPT:REF -SUBSYSTEM:CONSOLE -MANIFESTUAC:NO -OPT:ICF -ERRORREPORT:PROMPT -NOLOGO -TLBID:1 -DEBUG:FULL -WINMD:NO
+		LIBS += WindowsApp.lib
+	endif
+
+	CFLAGS += $(MSVC2017CompileFlags)
+	CXXFLAGS += $(MSVC2017CompileFlags)
+
+	TargetArchMoniker = $(subst $(WinPartition)_,,$(PlatformSuffix))
+
+	CC  = cl.exe
+	CXX = cl.exe
+
+	reg_query = $(call filter_out2,$(subst $2,,$(shell reg query "$2" -v "$1" 2>nul)))
+	fix_path = $(subst $(SPACE),\ ,$(subst \,/,$1))
+
+	ProgramFiles86w := $(shell cmd //c "echo %PROGRAMFILES(x86)%")
+	ProgramFiles86 := $(shell cygpath "$(ProgramFiles86w)")
+
+	WindowsSdkDir ?= $(call reg_query,InstallationFolder,HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\Microsoft SDKs\Windows\v10.0)
+	WindowsSdkDir ?= $(call reg_query,InstallationFolder,HKEY_CURRENT_USER\SOFTWARE\Wow6432Node\Microsoft\Microsoft SDKs\Windows\v10.0)
+	WindowsSdkDir ?= $(call reg_query,InstallationFolder,HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Microsoft SDKs\Windows\v10.0)
+	WindowsSdkDir ?= $(call reg_query,InstallationFolder,HKEY_CURRENT_USER\SOFTWARE\Microsoft\Microsoft SDKs\Windows\v10.0)
+	WindowsSdkDir := $(WindowsSdkDir)
+
+	WindowsSDKVersion ?= $(firstword $(foreach folder,$(subst $(subst \,/,$(WindowsSdkDir)Include/),,$(wildcard $(call fix_path,$(WindowsSdkDir)Include\*))),$(if $(wildcard $(call fix_path,$(WindowsSdkDir)Include/$(folder)/um/Windows.h)),$(folder),)))$(BACKSLASH)
+	WindowsSDKVersion := $(WindowsSDKVersion)
+
+	VsInstallBuildTools = $(ProgramFiles86)/Microsoft Visual Studio/2017/BuildTools
+	VsInstallEnterprise = $(ProgramFiles86)/Microsoft Visual Studio/2017/Enterprise
+	VsInstallProfessional = $(ProgramFiles86)/Microsoft Visual Studio/2017/Professional
+	VsInstallCommunity = $(ProgramFiles86)/Microsoft Visual Studio/2017/Community
+
+	VsInstallRoot ?= $(shell if [ -d "$(VsInstallBuildTools)" ]; then echo "$(VsInstallBuildTools)"; fi)
+	ifeq ($(VsInstallRoot), )
+		VsInstallRoot = $(shell if [ -d "$(VsInstallEnterprise)" ]; then echo "$(VsInstallEnterprise)"; fi)
+	endif
+	ifeq ($(VsInstallRoot), )
+		VsInstallRoot = $(shell if [ -d "$(VsInstallProfessional)" ]; then echo "$(VsInstallProfessional)"; fi)
+	endif
+	ifeq ($(VsInstallRoot), )
+		VsInstallRoot = $(shell if [ -d "$(VsInstallCommunity)" ]; then echo "$(VsInstallCommunity)"; fi)
+	endif
+	VsInstallRoot := $(VsInstallRoot)
+
+	VcCompilerToolsVer := $(shell cat "$(VsInstallRoot)/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt" | grep -o '[0-9\.]*')
+	VcCompilerToolsDir := $(VsInstallRoot)/VC/Tools/MSVC/$(VcCompilerToolsVer)
+
+	WindowsSDKSharedIncludeDir := $(shell cygpath -w "$(WindowsSdkDir)\Include\$(WindowsSDKVersion)\shared")
+	WindowsSDKUCRTIncludeDir := $(shell cygpath -w "$(WindowsSdkDir)\Include\$(WindowsSDKVersion)\ucrt")
+	WindowsSDKUMIncludeDir := $(shell cygpath -w "$(WindowsSdkDir)\Include\$(WindowsSDKVersion)\um")
+	WindowsSDKUCRTLibDir := $(shell cygpath -w "$(WindowsSdkDir)\Lib\$(WindowsSDKVersion)\ucrt\$(TargetArchMoniker)")
+	WindowsSDKUMLibDir := $(shell cygpath -w "$(WindowsSdkDir)\Lib\$(WindowsSDKVersion)\um\$(TargetArchMoniker)")
+
+	# For some reason the HostX86 compiler doesn't like compiling for x64
+	# ("no such file" opening a shared library), and vice-versa.
+	# Work around it for now by using the strictly x86 compiler for x86, and x64 for x64.
+	# NOTE: What about ARM?
+	ifneq (,$(findstring x64,$(TargetArchMoniker)))
+		VCCompilerToolsBinDir := $(VcCompilerToolsDir)\bin\HostX64
+	else
+		VCCompilerToolsBinDir := $(VcCompilerToolsDir)\bin\HostX86
+	endif
+
+	PATH := $(shell IFS=$$'\n'; cygpath "$(VCCompilerToolsBinDir)/$(TargetArchMoniker)"):$(PATH)
+	PATH := $(PATH):$(shell IFS=$$'\n'; cygpath "$(VsInstallRoot)/Common7/IDE")
+	INCLUDE := $(shell IFS=$$'\n'; cygpath -w "$(VcCompilerToolsDir)/include")
+	LIB := $(shell IFS=$$'\n'; cygpath -w "$(VcCompilerToolsDir)/lib/$(TargetArchMoniker)")
+
+	export INCLUDE := $(INCLUDE);$(WindowsSDKSharedIncludeDir);$(WindowsSDKUCRTIncludeDir);$(WindowsSDKUMIncludeDir)
+	export LIB := $(LIB);$(WindowsSDKUCRTLibDir);$(WindowsSDKUMLibDir)
+	TARGET := $(TARGET_NAME)_libretro.dll
+	PSS_STYLE :=2
+	LDFLAGS += -DLL
+
+# Windows MSVC 2015 x64
+else ifeq ($(platform), windows_msvc2015_x64)
+	CC  = cl.exe
+	CXX = cl.exe
+
+PATH := $(shell IFS=$$'\n'; cygpath "$(VS140COMNTOOLS)../../VC/bin/amd64"):$(PATH)
+PATH := $(PATH):$(shell IFS=$$'\n'; cygpath "$(VS140COMNTOOLS)../IDE")
+LIB := $(shell IFS=$$'\n'; cygpath -w "$(VS140COMNTOOLS)../../VC/lib/amd64")
+INCLUDE := $(shell IFS=$$'\n'; cygpath -w "$(VS140COMNTOOLS)../../VC/include")
+
+reg_query = $(call filter_out2,$(subst $2,,$(shell reg query "$2" -v "$1" 2>nul)))
+fix_path = $(subst $(SPACE),\ ,$(subst \,/,$1))
+WindowsSdkDir ?= $(call reg_query,InstallationFolder,HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\Microsoft SDKs\Windows\v10.0)
+WindowsSdkDir ?= $(call reg_query,InstallationFolder,HKEY_CURRENT_USER\SOFTWARE\Wow6432Node\Microsoft\Microsoft SDKs\Windows\v10.0)
+WindowsSdkDir ?= $(call reg_query,InstallationFolder,HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Microsoft SDKs\Windows\v10.0)
+WindowsSdkDir ?= $(call reg_query,InstallationFolder,HKEY_CURRENT_USER\SOFTWARE\Microsoft\Microsoft SDKs\Windows\v10.0)
+WindowsSdkDir := $(WindowsSdkDir)
+
+WindowsSDKVersion ?= $(firstword $(foreach folder,$(subst $(subst \,/,$(WindowsSdkDir)Include/),,$(wildcard $(call fix_path,$(WindowsSdkDir)Include\*))),$(if $(wildcard $(call fix_path,$(WindowsSdkDir)Include/$(folder)/um/Windows.h)),$(folder),)))$(BACKSLASH)
+WindowsSDKVersion := $(WindowsSDKVersion)
+
+export INCLUDE := $(INCLUDE);$(VCINSTALLDIR)INCLUDE;$(VCINSTALLDIR)ATLMFC\INCLUDE;$(WindowsSdkDir)include\$(WindowsSDKVersion)ucrt;$(WindowsSdkDir)include\$(WindowsSDKVersion)shared;$(WindowsSdkDir)include\$(WindowsSDKVersion)um
+export LIB := $(LIB);$(VCINSTALLDIR)LIB\amd64;$(VCINSTALLDIR)ATLMFC\LIB\amd64;$(WindowsSdkDir)lib\$(WindowsSDKVersion)ucrt\x64;$(WindowsSdkDir)lib\$(WindowsSDKVersion)um\x64
+
+INCFLAGS_PLATFORM = -I"$(WindowsSDKVersion)um" -I"$(WindowsSDKVersion)shared"
+TARGET := $(TARGET_NAME)_libretro.dll
+PSS_STYLE :=2
+LDFLAGS += -DLL -MACHINE:X64
+CFLAGS += -FS
+CXXFLAGS += -FS
+
+# Windows MSVC 2015 x86
+else ifeq ($(platform), windows_msvc2015_x86)
+	CC  = cl.exe
+	CXX = cl.exe
+
+PATH := $(shell IFS=$$'\n'; cygpath "$(VS140COMNTOOLS)../../VC/bin"):$(PATH)
+PATH := $(PATH):$(shell IFS=$$'\n'; cygpath "$(VS140COMNTOOLS)../IDE")
+LIB := $(shell IFS=$$'\n'; cygpath -w "$(VS140COMNTOOLS)../../VC/lib")
+INCLUDE := $(shell IFS=$$'\n'; cygpath -w "$(VS140COMNTOOLS)../../VC/include")
+
+reg_query = $(call filter_out2,$(subst $2,,$(shell reg query "$2" -v "$1" 2>nul)))
+fix_path = $(subst $(SPACE),\ ,$(subst \,/,$1))
+WindowsSdkDir ?= $(call reg_query,InstallationFolder,HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\Microsoft SDKs\Windows\v10.0)
+WindowsSdkDir ?= $(call reg_query,InstallationFolder,HKEY_CURRENT_USER\SOFTWARE\Wow6432Node\Microsoft\Microsoft SDKs\Windows\v10.0)
+WindowsSdkDir ?= $(call reg_query,InstallationFolder,HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Microsoft SDKs\Windows\v10.0)
+WindowsSdkDir ?= $(call reg_query,InstallationFolder,HKEY_CURRENT_USER\SOFTWARE\Microsoft\Microsoft SDKs\Windows\v10.0)
+WindowsSdkDir := $(WindowsSdkDir)
+
+WindowsSDKVersion ?= $(firstword $(foreach folder,$(subst $(subst \,/,$(WindowsSdkDir)Include/),,$(wildcard $(call fix_path,$(WindowsSdkDir)Include\*))),$(if $(wildcard $(call fix_path,$(WindowsSdkDir)Include/$(folder)/um/Windows.h)),$(folder),)))$(BACKSLASH)
+WindowsSDKVersion := $(WindowsSDKVersion)
+
+export INCLUDE := $(INCLUDE);$(VCINSTALLDIR)INCLUDE;$(VCINSTALLDIR)ATLMFC\INCLUDE;$(WindowsSdkDir)include\$(WindowsSDKVersion)ucrt;$(WindowsSdkDir)include\$(WindowsSDKVersion)shared;$(WindowsSdkDir)include\$(WindowsSDKVersion)um
+export LIB := $(LIB);$(VCINSTALLDIR)LIB;$(VCINSTALLDIR)ATLMFC\LIB;$(WindowsSdkDir)lib\$(WindowsSDKVersion)ucrt\x86;$(WindowsSdkDir)lib\$(WindowsSDKVersion)um\x86
+
+INCFLAGS_PLATFORM = -I"$(WindowsSDKVersion)um" -I"$(WindowsSDKVersion)shared"
+TARGET := $(TARGET_NAME)_libretro.dll
+PSS_STYLE :=2
+LDFLAGS += -DLL -MACHINE:X86
+CFLAGS += -FS
+CXXFLAGS += -FS
+
+# Windows MSVC 2010 x64
+else ifeq ($(platform), windows_msvc2010_x64)
+	LIBS=
+	CC  = cl.exe
+	CXX = cl.exe
+
+PATH := $(shell IFS=$$'\n'; cygpath "$(VS100COMNTOOLS)../../VC/bin/amd64"):$(PATH)
+PATH := $(PATH):$(shell IFS=$$'\n'; cygpath "$(VS100COMNTOOLS)../IDE")
+LIB := $(shell IFS=$$'\n'; cygpath "$(VS100COMNTOOLS)../../VC/lib/amd64")
+INCLUDE := $(shell IFS=$$'\n'; cygpath "$(VS100COMNTOOLS)../../VC/include")
+
+WindowsSdkDir := $(shell reg query "HKLM\SOFTWARE\Microsoft\Microsoft SDKs\Windows\v7.1A" -v "InstallationFolder" | grep -o '[A-Z]:\\.*')
+WindowsSdkDir ?= $(shell reg query "HKLM\SOFTWARE\Microsoft\Microsoft SDKs\Windows\v7.0A" -v "InstallationFolder" | grep -o '[A-Z]:\\.*')
+
+WindowsSDKIncludeDir := $(shell cygpath -w "$(WindowsSdkDir)\Include")
+WindowsSDKGlIncludeDir := $(shell cygpath -w "$(WindowsSdkDir)\Include\gl")
+WindowsSDKLibDir := $(shell cygpath -w "$(WindowsSdkDir)\Lib\x64")
+
+INCFLAGS_PLATFORM = -I"$(WindowsSDKIncludeDir)"
+export INCLUDE := $(INCLUDE);$(WindowsSDKIncludeDir);$(WindowsSDKGlIncludeDir)
+export LIB := $(LIB);$(WindowsSDKLibDir)
+TARGET := $(TARGET_NAME)_libretro.dll
+PSS_STYLE :=2
+LDFLAGS += -DLL
+LIBS =
+# Windows MSVC 2010 x86
+else ifeq ($(platform), windows_msvc2010_x86)
+	LIBS=
+	CC  = cl.exe
+	CXX = cl.exe
+
+PATH := $(shell IFS=$$'\n'; cygpath "$(VS100COMNTOOLS)../../VC/bin"):$(PATH)
+PATH := $(PATH):$(shell IFS=$$'\n'; cygpath "$(VS100COMNTOOLS)../IDE")
+LIB := $(shell IFS=$$'\n'; cygpath -w "$(VS100COMNTOOLS)../../VC/lib")
+INCLUDE := $(shell IFS=$$'\n'; cygpath "$(VS100COMNTOOLS)../../VC/include")
+
+WindowsSdkDir := $(shell reg query "HKLM\SOFTWARE\Microsoft\Microsoft SDKs\Windows\v7.1A" -v "InstallationFolder" | grep -o '[A-Z]:\\.*')
+WindowsSdkDir ?= $(shell reg query "HKLM\SOFTWARE\Microsoft\Microsoft SDKs\Windows\v7.0A" -v "InstallationFolder" | grep -o '[A-Z]:\\.*')
+
+WindowsSDKIncludeDir := $(shell cygpath -w "$(WindowsSdkDir)\Include")
+WindowsSDKGlIncludeDir := $(shell cygpath -w "$(WindowsSdkDir)\Include\gl")
+WindowsSDKLibDir := $(shell cygpath -w "$(WindowsSdkDir)\Lib")
+
+INCFLAGS_PLATFORM = -I"$(WindowsSDKIncludeDir)"
+export INCLUDE := $(INCLUDE);$(WindowsSDKIncludeDir);$(WindowsSDKGlIncludeDir)
+export LIB := $(LIB);$(WindowsSDKLibDir)
+TARGET := $(TARGET_NAME)_libretro.dll
+PSS_STYLE :=2
+LDFLAGS += -DLL
+LIBS =
+
+# Windows MSVC 2005 x86
+else ifeq ($(platform), windows_msvc2005_x86)
+	CC  = cl.exe
+	CXX = cl.exe
+
+PATH := $(shell IFS=$$'\n'; cygpath "$(VS80COMNTOOLS)../../VC/bin"):$(PATH)
+PATH := $(PATH):$(shell IFS=$$'\n'; cygpath "$(VS80COMNTOOLS)../IDE")
+INCLUDE := $(shell IFS=$$'\n'; cygpath "$(VS80COMNTOOLS)../../VC/include")
+LIB := $(shell IFS=$$'\n'; cygpath -w "$(VS80COMNTOOLS)../../VC/lib")
+BIN := $(shell IFS=$$'\n'; cygpath "$(VS80COMNTOOLS)../../VC/bin")
+
+WindowsSdkDir := $(shell reg query "HKLM\SOFTWARE\Microsoft\MicrosoftSDK\InstalledSDKs\8F9E5EF3-A9A5-491B-A889-C58EFFECE8B3" -v "Install Dir" | grep -o '[A-Z]:\\.*')
+
+WindowsSDKIncludeDir := $(shell cygpath -w "$(WindowsSdkDir)\Include")
+WindowsSDKAtlIncludeDir := $(shell cygpath -w "$(WindowsSdkDir)\Include\atl")
+WindowsSDKCrtIncludeDir := $(shell cygpath -w "$(WindowsSdkDir)\Include\crt")
+WindowsSDKGlIncludeDir := $(shell cygpath -w "$(WindowsSdkDir)\Include\gl")
+WindowsSDKMfcIncludeDir := $(shell cygpath -w "$(WindowsSdkDir)\Include\mfc")
+WindowsSDKLibDir := $(shell cygpath -w "$(WindowsSdkDir)\Lib")
+
+export INCLUDE := $(INCLUDE);$(WindowsSDKIncludeDir);$(WindowsSDKAtlIncludeDir);$(WindowsSDKCrtIncludeDir);$(WindowsSDKGlIncludeDir);$(WindowsSDKMfcIncludeDir);libretro-common/include/compat/msvc
+export LIB := $(LIB);$(WindowsSDKLibDir)
+TARGET := $(TARGET_NAME)_libretro.dll
+PSS_STYLE :=2
+LDFLAGS += -DLL
+CFLAGS += -D_CRT_SECURE_NO_DEPRECATE
+
+# Windows MSVC 2003 Xbox 1
+else ifeq ($(platform), xbox1_msvc2003)
+TARGET := $(TARGET_NAME)_libretro_xdk1.lib
+CC  = CL.exe
+CXX  = CL.exe
+LD   = lib.exe
+
+export INCLUDE := $(XDK)/xbox/include
+export LIB := $(XDK)/xbox/lib
+PATH := $(call unixcygpath,$(XDK)/xbox/bin/vc71):$(PATH)
+PSS_STYLE :=2
+CFLAGS   += -D_XBOX -D_XBOX1
+CXXFLAGS += -D_XBOX -D_XBOX1
+STATIC_LINKING=1
+HAS_GCC := 0
+
+# Windows MSVC 2003 x86
+else ifeq ($(platform), windows_msvc2003_x86)
+	CC  = cl.exe
+	CXX = cl.exe
+
+PATH := $(shell IFS=$$'\n'; cygpath "$(VS71COMNTOOLS)../../Vc7/bin"):$(PATH)
+PATH := $(PATH):$(shell IFS=$$'\n'; cygpath "$(VS71COMNTOOLS)../IDE")
+INCLUDE := $(shell IFS=$$'\n'; cygpath "$(VS71COMNTOOLS)../../Vc7/include")
+LIB := $(shell IFS=$$'\n'; cygpath -w "$(VS71COMNTOOLS)../../Vc7/lib")
+BIN := $(shell IFS=$$'\n'; cygpath "$(VS71COMNTOOLS)../../Vc7/bin")
+
+WindowsSdkDir := $(INETSDK)
+
+export INCLUDE := $(INCLUDE);$(INETSDK)/Include;libretro-common/include/compat/msvc
+export LIB := $(LIB);$(WindowsSdkDir);$(INETSDK)/Lib
+TARGET := $(TARGET_NAME)_libretro.dll
+PSS_STYLE :=2
+LDFLAGS += -DLL
+CFLAGS += -D_CRT_SECURE_NO_DEPRECATE
+
+# Windows
+else
+	TARGET := $(TARGET_NAME)_libretro.dll
+	CC ?= gcc
+	CXX ?= g++
+	SHARED := -shared -Wl,--no-undefined -Wl,--version-script=$(LINK_SCRIPT)
+	GC_STYLE := gnu
+	LDFLAGS += -static-libgcc -static-libstdc++ -lwinmm -lws2_32
+
+endif
+
+CORE_DIR     := .
+
+include Makefile.common
+
+OBJECTS := $(SOURCES_CXX:.cpp=.o) $(SOURCES_C:.c=.o) $(SOURCES_LIBCHDR:.c=.o)
+
+# ----------------------------------------------------------------
+# version.h: generated header read by libretro.c.  Single source of
+# truth is CORE_BASE_VERSION above; the script also stamps in the
+# short git rev.
+#
+# Regeneration runs at Makefile parse time via $(shell ...) so the
+# dependency graph sees a stable file with a stable mtime.  The
+# alternative (a `: FORCE` rule) was racy under `make -j4` on the
+# stock /usr/bin/make 3.81 still shipped on macOS, which silently
+# stopped mid-build.  The script does an in-place cmp + mv so
+# unchanged content leaves mtime untouched and incremental builds
+# stay incremental.
+# ----------------------------------------------------------------
+VERSION_H := $(CORE_DIR)/src/core/version.h
+
+# Skip the generator for read-only / metadata-only goals -- no point
+# spawning bash for `make clean`, `make print-FOO`, `make lint`, or
+# `make help`.  Builds (the empty MAKECMDGOALS case, default target)
+# always run it.
+NO_GEN_GOALS := clean lint help print-%
+ifeq ($(filter-out $(NO_GEN_GOALS),$(or $(MAKECMDGOALS),all)),)
+# All requested goals are read-only -- skip generator.
+else
+_VERSION_GEN := $(shell bash scripts/gen-version-h.sh && echo ok)
+endif
+
+# Note: $(CORE_DIR)/libretro.o: $(VERSION_H) dependency is wired up
+# AFTER the `all:` rule below, so Make 3.81 doesn't latch onto
+# libretro.o as the default goal.
+
+ifeq ($(DEBUG),1)
+   ifneq (,$(findstring msvc,$(platform)))
+      CFLAGS += -MTd
+      CXXFLAGS += -MTd
+      CFLAGS += -Od -Zi -D_DEBUG
+      CXXFLAGS += -Od -Zi -D_DEBUG
+      LDFLAGS += -DEBUG
+   else
+      FLAGS += -O0 -g
+   endif
+else
+   ifneq (,$(findstring msvc,$(platform)))
+      CFLAGS   += -MT
+      CXXFLAGS += -MT
+      CFLAGS   += -O2 -DNDEBUG
+      CXXFLAGS += -O2 -DNDEBUG
+   else
+      FLAGS    += $(OPT_LEVEL) -DNDEBUG
+   endif
+endif
+
+# Release builds with split debug symbols.
+# Set RELEASE_DEBUG_INFO=1 (release.yml does this) to keep -g in the
+# optimized build so we can later run objcopy --only-keep-debug /
+# dsymutil to ship a separate debug-info archive next to the stripped
+# binary in the GitHub release.  Has no effect when DEBUG=1 (-g is
+# already on) or under MSVC (which uses /Zi and a .pdb instead).
+ifeq ($(RELEASE_DEBUG_INFO),1)
+   ifeq (,$(findstring msvc,$(platform)))
+      FLAGS += -g
+   endif
+endif
+
+# COVERAGE=1 instruments the build with gcov.  Used by `make coverage`
+# below; don't combine with optimized builds.  Compiler emits .gcno
+# files at build time, .gcda files at run time.
+ifeq ($(COVERAGE),1)
+   ifeq (,$(findstring msvc,$(platform)))
+      FLAGS   += --coverage -O0 -g
+      LDFLAGS += --coverage
+   endif
+endif
+
+# -ffast-math removed (issue #517 audit): every hot loop in this core (68K,
+# GPU/DSP RISC interpreters, blitter) is integer-only, so it cannot speed
+# them up, and the A/B measurement confirmed no effect: interleaved
+# A/B/B/A, n=16 per arm, median 217.5 fps without vs 215.0 fps with
+# (-1.1%, i.e. fast-math was fractionally SLOWER), Mann-Whitney z=-0.60
+# p=0.5465 -- under the noise floor, report no effect.  To reproduce you
+# must first re-add a FASTMATH toggle (the audit used a temporary variable
+# in this block, added to BUILD_AXES so the flip flushes every object) and
+# then drive it with test/tools/opt_ab.sh; there is no standing knob,
+# because the flag no longer has two states worth switching between.
+# The only floating point in the tree that isn't test/trace-only is the I2S
+# resampler in src/jerry/dac.c (i2sPhase/i2sRateRatio, both in the
+# savestate) and event scheduling in src/core/event.c / src/tom/gpu.c
+# (riscUSec/consumed feeding EVENT_MAIN) -- both of those are emulated
+# state, and -ffast-math's reassociation/FMA-contraction/denormal-flushing
+# is host- and compiler-dependent, so it was a latent netplay/savestate
+# determinism hazard (same class as #400, #479) for zero measured benefit.
+# See axistune.c's header comment for the project's existing position on
+# host-dependent FP in emulated state.
+ifeq (,$(findstring msvc,$(platform)))
+   FLAGS += -fomit-frame-pointer -fno-common
+endif
+
+# ----------------------------------------------------------------
+# Linker dead-code elimination (issue #321).
+#
+# src/m68000/cpustbl.c ships TWO complete 68000 handler tables:
+# op_smalltbl_4_ff (3162 entries, "fast") and op_smalltbl_5_ff (1581,
+# "slow but compatible").  m68kinterface.c binds op_smalltbl_5_ff
+# unconditionally, so table 4 -- and every machine-generated cpuemu.c
+# handler body reachable only through it -- is linked in and never
+# called.  Letting the linker garbage-collect it needs no source
+# change at all; this block is the whole fix.
+#
+# GC_STYLE is opt-in PER PLATFORM, never global.  The release matrix
+# spans 16 toolchains while PR CI covers four, so a globally-applied
+# flag that one exotic linker rejects fails at tag time, not in review.
+# The rule used to set it in the platform blocks above:
+#
+#   gnu   -- the platform's SHARED line already passes GNU-ld-only
+#            options (--version-script / --no-undefined), which proves
+#            the link runs through GNU ld or lld, so --gc-sections is
+#            available too.  Section-per-symbol flags are required
+#            there: without them ELF/PE GC works at section
+#            granularity and one live handler pins the whole object.
+#   macho -- Apple ld64.  It is atom-based, so -dead_strip alone is
+#            sufficient and -ffunction-sections/-fdata-sections are
+#            no-ops; they are deliberately NOT added.
+#   unset -- byte-for-byte unchanged from before.  Covers every
+#            STATIC_LINKING=1 target (vita, switch/libnx, ctr, ps3,
+#            psl1ght, psp1, emscripten -- those emit a .a/.bc and
+#            never run a link, so the flags could not take effect
+#            anyway), every MSVC/Xbox target, Solaris ld, and theos_ios
+#            (Theos drives its own link).
+#
+# classic_armv7_a7 is the one target that opts in by hand rather than
+# via GC_STYLE, because it does NOT want the compile half: its CFLAGS
+# already carry -ffunction-sections -fdata-sections, and GC_STYLE:=gnu
+# would duplicate them.  It used to pass -Wl,--gc-sections in CFLAGS,
+# where it was provably inert -- the link line is $(OBJECTS) $(LDFLAGS)
+# only.  Measured with a Debian bookworm arm-linux-gnueabihf gcc 12
+# cross-link (a proxy for the modmyclassic toolchain, not that
+# toolchain itself), deleting that CFLAGS entry outright produced a
+# byte-identical 1,512,628-byte .so.
+#
+# Do not expect the macOS win here.  This block compiles with
+# -flto=4 -fwhole-program, so cpustbl.o is a slim LTO object and GCC's
+# IPA -- not the linker -- decides what dies: op_smalltbl_4_ff is
+# already absent from the baseline .so.  Moving the flag to LDFLAGS
+# links clean with a byte-identical dynsym list and saves 80 bytes
+# (1,512,628 -> 1,512,548, 0.005%), versus 22.7% on non-LTO ld64.
+# It is kept because a flag that reads as enabled should be enabled,
+# not because the size matters.
+#
+# Android is unaffected either way: ndk-build uses jni/Android.mk,
+# not this Makefile.
+# ----------------------------------------------------------------
+ifneq ($(STATIC_LINKING),1)
+ifneq ($(platform),theos_ios)
+   ifeq ($(GC_STYLE),gnu)
+      FLAGS   += -ffunction-sections -fdata-sections
+      LDFLAGS += -Wl,--gc-sections
+   else ifeq ($(GC_STYLE),macho)
+      LDFLAGS += -Wl,-dead_strip
+   endif
+endif
+endif
+
+# ----------------------------------------------------------------
+# ELF visibility / symbol interposition (issue #569).
+#
+# GCC assumes symbol interposition per translation unit unless told
+# otherwise: every cross-file global in the hot interpreter loops
+# (gpu_reg, dsp_pc, the flag/counter externs the 68K/GPU/DSP headers
+# share) gets reloaded through the GOT, and every cross-file call
+# (JaguarReadLong &c.) goes through the PLT, because in principle a
+# symbol could be overridden by something loaded earlier in the
+# process. That is a real possibility for a handful of libc entry
+# points and essentially never true of this project's own internals --
+# the whole exported surface is already pinned to a fixed set by
+# $(LINK_SCRIPT) (link.T / link-test.T), so nothing outside libretro.c's
+# retro_* functions is meant to be interposable at all.
+#
+# GC_STYLE=gnu (set above, per platform block) identifies every target
+# that links through GNU ld with a --version-script, which is a
+# slightly WIDER set than "ELF": unix, qnx, rpi*, generic
+# arm64/aarch64, generic armv* are the real ELF/GNU-ld matrix this
+# block exists for, but the native `win` (MinGW) block also sets
+# GC_STYLE=gnu -- purely because MinGW's ld honours --version-script
+# and --gc-sections too, not because its output is ELF. `win`'s TARGET
+# is a PE/COFF .dll, and libretro.h's RETRO_API expands to
+# __attribute__((__dllexport__)) there (see libretro.h's RETRO_API
+# definition), not the visibility attribute -- so this block's whole
+# rationale (GOT/PLT indirection from ELF-style interposition,
+# RETRO_API surviving -fvisibility=hidden via inherited visibility)
+# does not apply to it, and `win` IS built in CI
+# (c-cpp.yml's MSYS2 job, release.yml). It is therefore excluded
+# outright, the same way `theos_ios` is excluded from the
+# --gc-sections block just above for an analogous "GC_STYLE says gnu
+# but the platform isn't the thing this flag is for" reason.
+#
+# GC_STYLE=macho (Apple ld64's two-level namespace already resolves
+# same-image symbols directly, so this is a Linux/Pi/Android win, not
+# a macOS one) and unset (STATIC_LINKING=1 archive targets, MSVC/Xbox,
+# Solaris ld, theos_ios, and classic_armv7_a7, which opts into its own
+# bespoke -flto=4 -fwhole-program pipeline in its platform block above
+# instead) are excluded by the outer ifeq itself.
+#
+# -fno-semantic-interposition is added UNGUARDED for the platforms this
+# repo actually builds and tests (unix, rpi*, generic arm64/aarch64,
+# generic armv*): this Makefile has no cc-option-style "does this flag
+# compile" probe anywhere (checked), GCC has accepted the flag since
+# 5.1 (2015), and Clang accepts and silently ignores it, so every
+# toolchain on those rows clears that bar. `qnx` is excluded from just
+# this one flag (but keeps -fvisibility=hidden and LTO=1 below): nothing
+# in .github/workflows/ or .gitlab-ci.yml builds it (checked), so its
+# toolchain floor is unverified, and QNX SDP 6.x's qcc wraps a gcc old
+# enough (4.x) that the flag can hard-error rather than no-op there.
+# -fvisibility=hidden has no such floor (GCC >= 4.0) and stays on for
+# qnx. `win` gets neither flag at all -- see above.
+#
+# -fvisibility=hidden is added for non-TEST_EXPORTS builds only.
+# TEST_EXPORTS=1 is the wide white-box test ABI: the harnesses dlsym()
+# internal symbols (see link-test.T / exports-test.list above), which
+# hiding at compile time would break even though the version script
+# still lists them. retro_* itself is unaffected either way -- every
+# entry point in libretro.c is declared RETRO_API in libretro.h, which
+# expands (libretro-common/include/libretro.h) to
+# __attribute__((visibility("default"))) on non-Windows GCC/Clang >= 4,
+# and a visibility attribute already present on an earlier declaration
+# governs the later definition regardless of -fvisibility's default.
+# Verified empirically at the .o level (see task report): retro_init
+# stays "external" under -fvisibility=hidden while an ordinary global
+# like videoBuffer drops to "private external" (ELF STV_HIDDEN's
+# Mach-O equivalent) -- the flag works, and RETRO_API is what exempts
+# retro_*.
+#
+# Neither flag is an -O, so neither can trip issue #516.
+ifeq ($(GC_STYLE),gnu)
+ifneq ($(platform),win)
+   ifneq ($(platform),qnx)
+      FLAGS += -fno-semantic-interposition
+   endif
+   ifneq ($(TEST_EXPORTS),1)
+      FLAGS += -fvisibility=hidden
+   endif
+
+   # LTO (issue #569).  Default-on for these GNU-ld ELF targets; opt out
+   # with LTO=0.  macOS host A/B is indicative only; Linux/Pi CI + device
+   # `rpi_perf.sh` is the final arbiter.  `win` is excluded by the outer
+   # ifneq; `qnx` is excluded here (unverified gcc floor -- the same
+   # reason it is carved out of -fno-semantic-interposition).
+   # `make LTO=1 platform=rpi4_64` still works (now a no-op vs default).
+   ifneq ($(platform),qnx)
+      ifeq ($(LTO),1)
+         FLAGS   += -flto
+         LDFLAGS += -flto
+      endif
+   endif
+endif
+endif
+
+# Explicit LTO=1 on Mach-O (osx/ios/tvos): same knob, default-off.  Lets
+# a macOS host A/B the flag; Apple ld64 LTO is not the #569 ELF win and
+# is not default-on.
+ifeq ($(GC_STYLE),macho)
+   ifeq ($(LTO),1)
+      FLAGS   += -flto
+      LDFLAGS += -flto
+   endif
+endif
+# ----------------------------------------------------------------
+
+LDFLAGS += $(fpic) $(SHARED)
+FLAGS += $(fpic)
+FLAGS += $(INCFLAGS) $(INCFLAGS_PLATFORM)
+
+ifeq ($(OLD_GCC), 1)
+WARNINGS := -Wall
+else ifeq ($(NO_GCC), 1)
+WARNINGS :=
+else ifneq (,$(findstring msvc,$(platform)))
+WARNINGS :=
+else
+WARNINGS := -Wall \
+	-Wno-sign-compare \
+	-Wno-unused-variable \
+	-Wno-unused-but-set-variable \
+	-Wno-unused-function \
+	-Wno-uninitialized \
+	-Wno-strict-aliasing \
+	-Wno-overflow \
+	-fno-strict-overflow
+endif
+
+FLAGS += -D__LIBRETRO__ $(WARNINGS)
+
+ifneq (,$(findstring msvc,$(platform)))
+FLAGS += -DINLINE="_inline"
+else
+FLAGS += -DINLINE="inline"
+endif
+
+CXXFLAGS += $(FLAGS)
+CFLAGS   += $(FLAGS)
+
+# Optional: build with framebuffer/audio presentation diagnostics.
+# Enables periodic LOG_INF dumps from libretro.c retro_run() showing
+# tomWidth/tomHeight, screenPitch, sample pixels, ltxd/rtxd, DSPIsRunning.
+# Use: make DEBUG_PRESENTATION=1
+ifeq ($(DEBUG_PRESENTATION), 1)
+CXXFLAGS += -DDEBUG_PRESENTATION
+CFLAGS   += -DDEBUG_PRESENTATION
+endif
+
+OBJOUT   = -o
+LINKOUT  = -o
+
+ifneq (,$(findstring msvc,$(platform)))
+	OBJOUT = -Fo
+	LINKOUT = -out:
+	LD = link.exe
+else
+	LD = $(CC)
+endif
+
+%.o: %.cpp
+	$(CXX) -c $(OBJOUT)$@ $< $(CXXFLAGS)
+
+%.o: %.c
+	$(CC) -c $(OBJOUT)$@ $< $(CFLAGS)
+
+ifeq ($(platform), theos_ios)
+COMMON_FLAGS := -DIOS $(COMMON_DEFINES) $(INCFLAGS) -I$(THEOS_INCLUDE_PATH) -Wno-error
+$(LIBRARY_NAME)_CFLAGS += $(CFLAGS) $(COMMON_FLAGS) $(LIBCHDR_CFLAGS) $(LIBCHDR_WARNFLAGS)
+$(LIBRARY_NAME)_CXXFLAGS += $(CXXFLAGS) $(COMMON_FLAGS)
+${LIBRARY_NAME}_FILES = $(SOURCES_CXX) $(SOURCES_C) $(SOURCES_LIBCHDR)
+include $(THEOS_MAKE_PATH)/library.mk
+else
+# Force a rebuild when the build configuration changes ($(BUILD_AXES)).
+# Almost every object is identical across an ABI flip, so a plain `make`
+# followed by `make TEST_EXPORTS=1 test` would otherwise reuse the
+# production-slim library -- it is newer than every object, so nothing
+# relinks -- and the white-box tests fail with "Missing: m68k_execute".
+# Delete the library outright rather than relying on a stamp file's mtime:
+# the stamp and the library can land in the same second, which is exactly
+# the timestamp-granularity trap this is meant to close.  Runs at parse
+# time, once TARGET is known.
+#
+# The stamp covers every compile-affecting switch, not just TEST_EXPORTS
+# (issue #457).  It originally tracked TEST_EXPORTS alone, which left the
+# same hazard open one level up:
+#   BENCH_PROFILE -- `make TEST_EXPORTS=1` then
+#     `make BENCH_PROFILE=1 TEST_EXPORTS=1` recompiled nothing, so no
+#     object got -DBENCH_PROFILE, no PERF_COUNTER registered, and every
+#     timing_probe tool died with "timing_halfline_callbacks counter not
+#     found" -- which reads as a broken tool, not an ignored flag.
+#   DEBUG -- `make` then `make DEBUG=1` recompiled *zero* objects: a
+#     "debug build" that is entirely -O2 with no debug info.  The reverse
+#     leaves -O0 objects in a release binary and silently invalidates any
+#     performance measurement taken from it.
+# VJ_EXPECT_BUILD cannot catch either: the git rev is identical across the
+# flip, so the guard passes while the binary is wrong.
+#
+# TEST_EXPORTS also changes object *content*, not just the export list:
+# it adds -DVJ_TRACE to CFLAGS (see the line above), so vjtrace.o defines
+# the vjtrace_* functions only in that branch, and every object carrying a
+# VJT_EMIT/VJT_WATCH_*/vjtrace_pchist_*/vjtrace_init call site compiles to
+# real calls in one mode and to nothing in the other.  A stale object from
+# the other mode that survives the relink breaks the build in one direction
+# and lies in the other: TEST_EXPORTS=1 -> plain fails with undefined
+# vjtrace_* symbols, while plain -> TEST_EXPORTS=1 links fine but keeps the
+# no-op macro expansion, so the ring silently records nothing despite
+# vjtrace_* being exported.
+#
+# So a mode change flushes *every* object, not a curated list of the ones
+# believed to be trace-hooked.  That list is exactly the stale-.o hazard it
+# was meant to prevent: it shipped without src/tom/blit_memo.o, whose
+# BlitMemoLaunch VJT_EMIT call site broke `make TEST_EXPORTS=1 && make`.
+# Any list -- hand-written, grepped, or derived from -MD -- can also miss a
+# file that picks up the macros through an indirect include, so there is no
+# list.  Cost is one full rebuild per flip (~21s at -j8 without ccache);
+# the curated list already recompiled most of the heavy objects anyway.
+#
+# The $(shell) runs at parse time, so it would also fire under `make -n`.
+# That was tolerable when the flush was nine objects; with the whole object
+# list in scope a dry run would silently cost a full rebuild, so skip it
+# when -n is in effect.
+#
+# GNU make encodes -n two different ways, so both are matched.  Normally the
+# short options collect into MAKEFLAGS' first word with no leading dash
+# ("n", "ns", "nk") -- but under make 3.81 (stock macOS) a long option
+# empties that group and -n reappears as its own word, e.g.
+# `make --no-print-directory -n` gives MAKEFLAGS=" --no-print-directory -n".
+# Only the letter group is scanned for 'n' (no short option other than -n
+# uses that letter); long options and the `--`/NAME=value words that carry
+# command-line variables start with '-' or contain '=', and are dropped, so
+# `make platform=android` cannot false-match.  A false positive here would
+# silently skip the flush and bring the stale-object bug straight back, so
+# the detection is deliberately conservative in that direction.
+MAKEFLAGS_LETTERS := $(filter-out -%,$(firstword $(MAKEFLAGS)))
+DRY_RUN := $(strip $(findstring n,$(MAKEFLAGS_LETTERS)) \
+                   $(filter -n --dry-run --just-print --recon,$(MAKEFLAGS)))
+$(if $(DRY_RUN),,\
+$(shell [ "$$(cat $(BUILD_CONFIG_STAMP) 2>/dev/null)" = "$(BUILD_CONFIG)" ] \
+        || { printf '%s' "$(BUILD_CONFIG)" > $(BUILD_CONFIG_STAMP); \
+             rm -f $(TARGET) $(OBJECTS) $(LEGACY_LINK_MODE_STAMP); }))
+
+all: $(TARGET)
+$(TARGET): $(OBJECTS)
+ifeq ($(STATIC_LINKING), 1)
+	$(AR) rcs $@ $(OBJECTS)
+else
+	$(LD) $(LINKOUT)$@ $(OBJECTS) $(LDFLAGS)
+endif
+
+# libchdr is C99; the rest of the core is gnu89. A dedicated rule so
+# the generic %.o: %.c line cannot compile unity.c as C89.  Must sit
+# AFTER `all:` so it is not the default goal.
+#
+# MINIZ_DEFLATE_APIS (texture dump's PNG encoder, issue #369) rides in
+# LIBCHDR_CFLAGS -- see the comment in Makefile.common -- so the
+# theos_ios path, which compiles unity.c without this rule, gets it too.
+$(LIBCHDR_DIR)/unity.o: $(LIBCHDR_DIR)/unity.c
+	$(CC) -c $(OBJOUT)$@ $< $(CFLAGS) $(LIBCHDR_CFLAGS) $(LIBCHDR_WARNFLAGS)
+
+# version.h dependency hook (must come after `all:` so Make 3.81 on
+# stock macOS doesn't latch onto libretro.o as the default goal).
+$(CORE_DIR)/libretro.o: $(VERSION_H)
+
+clean:
+	rm -f $(TARGET) $(OBJECTS) $(BUILD_CONFIG_STAMP) $(LEGACY_LINK_MODE_STAMP) \
+		test/test_cheat test/test_event_queue test/test_blitter_simd \
+		test/test_dsp_mac40 test/test_m68k_ops test/test_m68k_irq_ssp test/test_m68k_prefetch test/test_gpu_ops test/test_tom_readback test/test_mmult \
+		test/test_dsp_ops test/test_dsp_unit test/test_hle_bios \
+		test/test_subsystem_init test/test_subsystem_timeline \
+		test/test_irq_cascade test/test_boot_patterns test/test_fountain_crash test/test_audio_pipeline \
+		test/test_audio_clipping test/test_audio_presence test/test_audio_boundary test/test_audio_rate test/test_pit_clock_rate \
+		test/test_blitter_mmio test/test_blitter_cmd test/test_eeprom_lifecycle \
+		test/test_eeprom_read_race \
+		test/test_tom_visible_window test/test_framebuffer_integrity \
+		test/test_butch_cd test/test_bios_config test/test_boot_config \
+		test/test_cart_format test/test_cart_needs_bios test/test_crash_detect_cd_wedge test/test_crash_detect_inframe \
+		test/test_cd_boot test/test_cd_hle_boot test/test_cd_bios_boot test/test_cd_toc_contract test/test_cd_fifo_stream test/test_cd_ssi_stream test/test_cd_second_transfer test/test_cd_hle_idempotent test/test_cd_lost_wakeup test/test_cd_pregap test/test_cd_chd test/test_chd_unit test/test_cd_synth_read test/test_cd_synth_butch test/test_cd_synth_cdda test/test_cd_synth_subq \
+		test/test_audio_dac test/test_blitter \
+		test/test_state_compat test/test_frontend_pacing test/test_frontend_ext test/test_debug_iface test/test_jgd test/test_jaggd_fs \
+		test/dump_pc test/heap_search \
+		tools/jagcd/jagcd-chd-check \
+		test/tools/test_memory_map test/tools/test_option_visibility test/test_memtrack test/test_nvmbios test/tools/test_dsp_audio_diag \
+		test/tools/test_frame_timing test/tools/test_runahead_determinism test/tools/test_pertitle_db test/tools/test_option_explain \
+		test/tools/test_disk_control test/tools/cd_wedge_probe \
+		test/test_biosdb test/test_cart_bios_loader \
+		test/test_titledb test/test_titlehook test/tools/test_hook_gate test/tools/test_upload_illegal_park test/tools/test_flipout_851 test/tools/test_ffyl_856 test/tools/test_ruiner_866 test/tools/test_raw_binary_boot test/tools/test_blitter_hung test/tools/test_club_drive_611 test/tools/test_doom_pace_gate test/tools/test_cf_canary test/tools/bus_census_probe \
+		test/tools/test_wedge_spin test/tools/test_music_demo_dsp_bank test/tools/test_texdump test/tools/test_texreplace test/test_voicechat test/test_voice_netpacket test/tools/test_voicechat_inertness test/tools/voicechat_pair test/tools/i2s_lag_probe \
+		test/tools/dsp_idle_probe_falsify test/tools/dsp_idle_ab \
+		test/tools/gpu_idle_probe_falsify test/tools/gpu_idle_ab test/tools/idle_skip_scale_ab \
+		test/tools/joymatrix_identity test/tools/teamtap_ports \
+		test/tools/teamtap_rom_probe test/tools/mouse_decode_test \
+		test/tools/rotary_decode_test test/tools/analog_decode_test \
+		test/tools/paddle_decode_test test/tools/procontroller_decode_test test/tools/sixd_decode_test \
+		test/tools/tuning_identity test/tools/test_lightgun \
+		test/tools/blitter_static_leak \
+		test/test_quadrature test/test_axistune \
+		test/.skipped-checks
+
+# Self-contained unit tests (parser + list management + simulated
+# memory application). Does not require a ROM or a working build of
+# the full core.
+ifneq (,$(findstring msvc,$(platform)))
+test:
+	@echo "make test requires GCC/Clang flags; use MSYS2/Unix or compile test/test_cheat.c manually."
+	@false
+else ifneq ($(TEST_EXPORTS),1)
+# When `make test` is invoked without TEST_EXPORTS=1, the shipped .so
+# was linked with link.T (production-slim, retro_* only) and the
+# white-box test binaries can't dlsym into JaguarReset / DSPGetRAM /
+# etc.  Force a re-link with link-test.T by removing the .so and
+# re-invoking make with TEST_EXPORTS=1 so the wider symbol set is
+# exported just for this build.  After `make test` finishes, the .so
+# in the working tree has the wider exports — re-run `make` (no flag)
+# to restore the production-slim ABI.
+test:
+	@rm -f $(TARGET)
+	@$(MAKE) TEST_EXPORTS=1 test
+
+# The per-binary rules below only exist in the TEST_EXPORTS=1 branch.
+# Without this guard, a bare `make test/<binary>` silently falls through
+# to GNU make's built-in %:%.c rule, which links with the core's
+# -dynamiclib LDFLAGS and produces an UNEXECUTABLE shared library
+# ("cannot execute binary file" at run time -- this broke
+# cd_boot_matrix.sh's harness build).  Fail loudly instead.
+test/test_% test/tools/test_%:
+	@echo "ERROR: test binaries need the TEST_EXPORTS=1 rule set:" >&2
+	@echo "  make TEST_EXPORTS=1 $@" >&2
+	@false
+else
+# Every harness that dlopens the core verifies the binary's embedded git
+# rev (+ -dirty) against this before running -- a stale dylib fails loudly
+# instead of silently testing the wrong code (see scripts/build-id.sh).
+test: export VJ_EXPECT_BUILD := $(shell ./scripts/build-id.sh)
+# Per-process EEPROM fixture scratch: two concurrent `make test` runs
+# (different worktrees/sessions sharing /tmp) would otherwise recompile
+# and overwrite the same generator binary and regenerate/truncate the
+# same fixture ROM out from under each other mid-suite.  $(shell echo
+# $$PPID) is evaluated once, at parse time, in a subshell whose parent
+# is this `make` process -- so every recipe line below sees the same
+# value for the life of one `make test` invocation, and two concurrent
+# invocations get different values.
+test: EEPROM_GEN_TOOL := /tmp/vj_gen_eeprom_test_rom_$(shell echo $$PPID)
+test: EEPROM_FIXTURE := /tmp/vj_eeprom_lifecycle_$(shell echo $$PPID).j64
+test: test/test_dram_timing test/test_cheat test/test_event_queue test/test_jlink test/test_jlink_tcp test/test_jlink_discover test/test_voicechat test/test_jlink_netpacket test/test_voicemodem_netpacket test/test_voice_netpacket test/test_uart_loopback test/test_jlink_negotiate test/test_blitter_simd test/test_dsp_mac40 test/test_titledb test/test_titlehook test/test_biosdb test/tools/test_gdbstub_proto \
+		$(TARGET) test/test_m68k_ops test/test_m68k_irq_ssp test/test_m68k_prefetch test/test_gpu_ops test/test_tom_readback test/test_mmult test/test_dsp_ops \
+		test/test_dsp_unit test/test_hle_bios test/test_subsystem_init \
+		test/test_subsystem_timeline test/test_irq_cascade test/test_boot_patterns \
+		test/test_fountain_crash \
+		test/test_audio_pipeline test/test_audio_clipping test/test_audio_presence test/test_audio_boundary test/test_audio_rate test/test_pit_clock_rate \
+		test/test_blitter_mmio test/test_blitter_cmd test/test_eeprom_lifecycle test/test_eeprom_read_race test/test_tom_visible_window \
+		test/test_framebuffer_integrity test/test_state_compat \
+		test/test_frontend_pacing test/test_frontend_ext test/test_debug_iface test/test_jgd test/test_jaggd_fs \
+		test/tools/test_runahead_determinism test/tools/test_wedge_spin test/tools/test_music_demo_dsp_bank test/tools/test_texdump test/tools/test_texreplace \
+		test/tools/dsp_idle_probe_falsify test/tools/gpu_idle_probe_falsify test/tools/idle_skip_scale_ab \
+		test/test_butch_cd test/test_bios_config test/test_boot_config \
+		test/test_cart_format test/test_cart_needs_bios test/test_cart_bios_loader test/test_crash_detect_cd_wedge test/test_crash_detect_inframe \
+		test/test_cd_boot test/test_cd_hle_boot test/test_cd_bios_boot test/test_cd_toc_contract test/test_cd_fifo_stream test/test_cd_ssi_stream test/test_cd_second_transfer test/test_cd_hle_idempotent test/test_cd_lost_wakeup test/test_cd_pregap test/test_cd_chd test/test_chd_unit test/test_cd_synth_read test/test_cd_synth_butch test/test_cd_synth_cdda test/test_cd_synth_subq \
+		test/test_audio_dac test/test_blitter \
+		test/tools/test_memory_map test/tools/test_op_gpu_object test/tools/test_option_visibility test/test_memtrack test/test_nvmbios test/test_uart_core test/test_netlink_host \
+		test/tools/netlink_pair test/tools/netlink_latency test/tools/netlink_delay_proxy test/tools/netlink_discover_probe test/tools/netlink_rebuild_witness test/tools/netlink_mismatch_witness test/tools/perf_iface_witness test/tools/voicemodem_pair test/tools/voicechat_pair test/tools/test_voicechat_inertness test/tools/netlink_game test/tools/test_pertitle_db test/tools/test_option_explain test/tools/test_disk_control \
+		test/tools/test_hook_gate test/tools/test_upload_illegal_park test/tools/test_flipout_851 test/tools/test_ffyl_856 test/tools/test_ruiner_866 test/tools/test_raw_binary_boot test/tools/test_blitter_hung test/tools/test_club_drive_611 test/tools/test_doom_pace_gate test/tools/test_cf_canary \
+		test/tools/i2s_lag_probe test/tools/joymatrix_identity \
+		test/tools/teamtap_ports \
+		test/test_quadrature test/test_axistune test/tools/mouse_decode_test \
+		test/tools/rotary_decode_test test/tools/analog_decode_test \
+		test/tools/paddle_decode_test test/tools/procontroller_decode_test test/tools/sixd_decode_test \
+		test/tools/tuning_identity test/tools/test_lightgun \
+		test/tools/blitter_static_leak \
+		tools/jagcd/jagcd-chd-check
+	@# Skip ledger: truncate FIRST so a previous run's rows cannot resurface
+	@# as fresh skips (the stale-row failure mode documented for
+	@# cd_boot_matrix.sh).  Every optional check below records into it, and
+	@# the summary at the end of this recipe prints the roll-up.
+	@bash scripts/test-skip.sh reset
+	@# The wide test ABI is spelled twice -- link-test.T for GNU ld, and
+	@# exports-test.list for Mach-O -- and a symbol added to only one is
+	@# hidden on the other platform, where harness_dlsym silently returns
+	@# NULL.  Cheap, so it runs before anything links against that ABI.
+	@python3 scripts/check-export-lists.py
+	@# Which blitter each platform actually selects (issue #560).  Same
+	@# spirit as the export-list check above: a build-system assertion that
+	@# needs no core, so it runs before anything links.  It exists because
+	@# picking the WRONG blitter is silent -- scalar compiles, links, and
+	@# passes every functional test below; it is only slow, on hardware no
+	@# CI runner owns.  Uses `make -n` deliberately; see the script header.
+	@bash test/tools/simd_matrix_check.sh
+	./test/test_dram_timing
+	./test/test_cheat
+	./test/test_event_queue
+	./test/test_jlink
+	./test/test_jlink_tcp
+	./test/test_jlink_discover
+	./test/test_voicechat
+	./test/test_jlink_netpacket ./$(TARGET)
+	@# The voice modem over the OTHER transport (#494).  voicemodem_pair
+	@# and uv_modem_game_test both drive TCP; this is the only check on
+	@# the netpacket path -- the one users get when they leave
+	@# virtualjaguar_netlink disabled and use RetroArch's own netplay.
+	@# Two private copies of the core, two netpacket sessions, packets
+	@# relayed between them: no sockets, no ports, no ROM.
+	./test/test_voicemodem_netpacket ./$(TARGET)
+	@# #585: host-side voice over framed vjag-netlink-2 netpacket (hello
+	@# negotiate + unreliable VJVC). Same two-copy relay pattern as the
+	@# voicemodem netpacket test; synthetic mic via env 78 mic iface.
+	./test/test_voice_netpacket ./$(TARGET)
+	./test/test_uart_loopback
+	@# #552: end-to-end wire-speedup negotiation against a hand-crafted
+	@# fake peer over real sockets -- proves the interop safety property
+	@# (a TCP-connected peer that never answers on the discovery port
+	@# never gets the emulated timing accelerated at it) that the pure
+	@# unit tests above cannot, since jlink.c is single-instance.
+	./test/test_jlink_negotiate
+	./test/test_uart_core ./$(TARGET)
+	./test/test_netlink_host ./$(TARGET)
+	bash test/tools/netlink_pair_test.sh ./$(TARGET)
+	@# Discovery needs UDP broadcast to fan out between two local processes.
+	@# That is a host capability, not a property of the core -- GitHub's macOS
+	@# runners drop it -- so the script probes for it and exits 77 rather than
+	@# reporting a failure the code cannot cause.  Ledgered, never a silent pass.
+	@if bash test/tools/netlink_discover_pair.sh ./$(TARGET); then :; \
+	 else rc=$$?; \
+	   if [ $$rc -eq 77 ]; then \
+	     bash scripts/test-skip.sh record "LAN discovery pair (#502)" "host does not deliver UDP broadcast between local processes"; \
+	   else exit $$rc; fi; \
+	 fi
+	bash test/tools/voicemodem_pair_test.sh ./$(TARGET)
+	bash test/tools/voicechat_pair_test.sh
+	@# Voice-chat inertness (#485): yarc.j64 is the committed public fixture
+	@# (same as test_texdump).  Guard exit 77 anyway so a stripped checkout
+	@# ledgers a skip instead of failing make test.
+	@if ./test/tools/test_voicechat_inertness ./$(TARGET) test/roms/yarc.j64 --quiet; then :; \
+	 else rc=$$?; \
+	   if [ $$rc -eq 77 ]; then \
+	     bash scripts/test-skip.sh record "Voice chat inertness (#485)" "yarc.j64 missing from test/roms/"; \
+	   else exit $$rc; fi; \
+	 fi
+	bash test/tools/netlink_latency_test.sh ./$(TARGET)
+	@# Wire-speed enhancement (#498).  Three real core pairs whose only
+	@# difference is each side's virtualjaguar_netlink_speed, so the
+	@# MISMATCHED pair is exercised as a first-class configuration: the
+	@# option's whole documented contract is "both sides, same value; one
+	@# side just gets less benefit", and nothing else would notice if a
+	@# one-sided setup actually stalled the link instead. Uses the same
+	@# below-ephemeral PID-spread port band as the witnesses below.
+	bash test/tools/netlink_wire_speed_test.sh ./$(TARGET)
+	@# Review-round-1 finding (task 4, #467): no other test runs a core in
+	@# a discovery-active mode long enough in REAL wall-clock time (not
+	@# frame count) for netlink_rebuild_host_options()'s 2s rate-limit
+	@# gate to open, so its SET_CORE_OPTIONS_V2 push -- the feature's
+	@# actual deliverable -- had never executed anywhere. Single process:
+	@# injects one real UDP beacon over the core's own discovery socket,
+	@# paces retro_run() past the 2s gate, and asserts the rebuild's own
+	@# log line fires and three independently-hidden option rows (host,
+	@# CD-only, mouse tuning) are still hidden afterward.
+	@# PID-spread the discovery port below Linux's ephemeral range so two
+	@# concurrent `make test` runs cannot silently share the SO_REUSEPORT
+	@# socket and consume each other's beacons.
+	VJ_DISC_PORT=$$((23000 + ($$$$ % 4000))) ./test/tools/netlink_rebuild_witness ./$(TARGET)
+	@# Regression witness for #501: the device-mismatch warning used to be
+	@# dead code whenever the host came from <system>/vj_netlink.txt or
+	@# VJ_NETLINK_HOST, because the rebuild call site compared the RAW
+	@# option string ("vj_netlink.txt", a sentinel) against the peer
+	@# table's dotted-quad addresses. Runs the core in tcp_client with the
+	@# "From file" preset, injects one Voice Modem beacon, and asserts the
+	@# JagLink-vs-Voice-Modem warning actually reaches the OSD. Same
+	@# PID-spread discovery port as the rebuild witness above.
+	VJ_DISC_PORT=$$((27000 + ($$$$ % 4000))) ./test/tools/netlink_mismatch_witness ./$(TARGET)
+	@# Perf-interface plumbing (#510).  Nothing else in the suite answers
+	@# env 28, so without this the whole feature short-circuits at
+	@# `if (vjPerfActive)` and a broken registration would still be green.
+	@# Also the gate on probe balance: a VJP_ENTER region that gains an
+	@# early return silently wedges its slot off for the rest of a session.
+	./test/tools/perf_iface_witness ./$(TARGET) || test $$? -eq 77
+	@# Ultra Vortek Voice Modem (#481) end to end, the only retail JVM
+	@# title: two core instances drive the real ROM through 911 -> the
+	@# ANSWER/DIAL choreography -> the in-game lockstep data phase, gating
+	@# on $$F0xx pad words actually crossing the link.  voicemodem_pair
+	@# above covers the handshake synthetically; this is the only check
+	@# that proves the game itself gets online.  Needs the private ROM --
+	@# exit 77 is ledgered, never a silent pass.  ~95 s (two realtime
+	@# 5400-frame instances), so it is the slowest optional check here.
+	@if bash test/tools/uv_modem_game_test.sh ./$(TARGET); then :; \
+	 else rc=$$?; \
+	   if [ $$rc -eq 77 ]; then \
+	     bash scripts/test-skip.sh record "Ultra Vortek Voice Modem full-game netplay (#481)" "no ROM matching 'Ultra Vortek (1995).jag' in the private corpus"; \
+	   else exit $$rc; fi; \
+	 fi
+	@# vjtrace flight-recorder selftest: determinism (field_diff +
+	@# trace_memdiff on two identical runs), watch attribution, and
+	@# VJ_TRACE_RING wrap correctness. Builds its own analyzer/smoke tools
+	@# into test/tools/ on first run (see the script header); needs only
+	@# the in-tree test/roms/yarc.j64, never test/roms/private.
+	bash test/tools/vjtrace_selftest.sh ./$(TARGET)
+	@# Boot-matrix shared logic (matrix_common.sh): core-fault verdicts must
+	@# never be blamed on a title, and the row cache must ignore docs-only
+	@# changes. Synthetic logs only -- no ROMs, no core, runs in <1s.
+	bash test/tools/matrix_common_test.sh
+	@# Matrix-diff release gate (#749): stage ordering, crash-signature and
+	@# asymmetry detection, exit codes. Synthetic fixtures -- no corpus needed.
+	bash test/test_matrix_diff.sh
+	./test/test_blitter_mmio
+	./test/test_blitter_cmd ./$(TARGET)
+	./test/test_pit_clock_rate
+	./test/test_tom_visible_window
+	./test/test_blitter_simd
+	./test/test_dsp_mac40
+	./test/test_titledb
+	./test/test_biosdb
+	./test/test_cart_bios_loader
+	./test/test_titlehook
+	./test/tools/test_gdbstub_proto
+	./test/test_m68k_ops
+	./test/test_m68k_irq_ssp
+	./test/test_m68k_prefetch
+	./test/test_gpu_ops
+	./test/test_tom_readback
+	./test/test_mmult
+	./test/test_dsp_ops
+	./test/test_dsp_unit
+	./test/test_hle_bios
+	./test/test_subsystem_init ./$(TARGET)
+	./test/test_subsystem_timeline ./$(TARGET)
+	./test/test_irq_cascade ./$(TARGET)
+	./test/test_boot_patterns
+	@# Fountain (#469): dummy-cart vector park always (CI).  Live jagcrypt
+	@# ROM is public but not vendored -- ledger a skip for that arm only.
+	./test/test_fountain_crash ./$(TARGET) --bios --quiet
+	@if [ -f /tmp/fountain_vj.j64 ]; then \
+		./test/test_fountain_crash ./$(TARGET) /tmp/fountain_vj.j64 --bios --frames 180 --option virtualjaguar_pal=enabled --quiet; \
+	else \
+		bash scripts/test-skip.sh record "Fountain live abort (#469)" "no /tmp/fountain_vj.j64"; \
+	fi
+	@# test_audio_pipeline takes an OPTIONAL positional ROM; without it, its
+	@# onset check and its BIOS-vs-HLE comparison skip unconditionally --
+	@# with ROMs, without ROMs, always.  It was invoked bare, so those two
+	@# checks were permanently vacuous.  Feed it the same Iron Soldier 1
+	@# dump the presence check uses (boots straight to a music-on title).
+	@rom=$$(bash scripts/find-rom.sh 'Iron Soldier (1994).jag' 'Iron Soldier (World)*.j64' 'Iron Soldier.jag'); \
+	if [ -n "$$rom" ]; then \
+		./test/test_audio_pipeline ./$(TARGET) "$$rom"; \
+	else \
+		bash scripts/test-skip.sh record "Audio pipeline (onset + BIOS/HLE cmp)" "no ROM matching 'Iron Soldier*' in the private corpus"; \
+		./test/test_audio_pipeline ./$(TARGET); \
+	fi
+	./test/test_audio_clipping ./$(TARGET) --self-test
+	@# Wedge-detector spin-aliasing regression (#378 pilot finding): a
+	@# healthy GPU wait/spin loop must not log gpu_wedge.  Super Burnout
+	@# spins ~446k GPU opcodes/frame at one sampled PC during attract.
+	@rom=$$(bash scripts/find-rom.sh 'Super Burnout (1995).jag' 'Super Burnout*.jag' 'Super Burnout*.j64'); \
+	if [ -n "$$rom" ]; then \
+		./test/tools/test_wedge_spin ./$(TARGET) "$$rom"; \
+	else \
+		bash scripts/test-skip.sh record "Wedge spin-aliasing (Super Burnout)" "no ROM matching 'Super Burnout*' in the private corpus"; \
+	fi
+	@# #853: the instruction behind a DSP-issued D_FLAGS store must use the
+	@# pre-store register bank.  Music Demo's `store D_FLAGS; movei r31`
+	@# entry escaped the DSP at frame 5 (BIOS) / ran away (HLE) when the
+	@# bank switched inside the store.  Both boot modes.
+	@rom=$$(bash scripts/find-rom.sh 'Music Demo (2002) (ScatoLOGIC).jag' 'Music Demo*.jag' 'Music Demo*.j64'); \
+	if [ -n "$$rom" ]; then \
+		./test/tools/test_music_demo_dsp_bank ./$(TARGET) "$$rom" --frames 1200 && \
+		./test/tools/test_music_demo_dsp_bank ./$(TARGET) "$$rom" --frames 1200 --bios; \
+	else \
+		bash scripts/test-skip.sh record "Music Demo DSP bank (#853)" "no ROM matching 'Music Demo*' in the private corpus"; \
+	fi
+	@# ROM lookup goes through scripts/find-rom.sh, which searches the whole
+	@# private corpus case-insensitively and prefers the canonical top-level
+	@# copy over duplicates buried in sub-collections.  It replaced a pair of
+	@# hardcoded literal paths per title: the corpus names titles
+	@# inconsistently ("Iron Soldier 2 (World).j64" vs "Iron Soldier (World)
+	@# (v1.04).j64"), so a literal path that does not match turns the check
+	@# into a SKIP that still exits 0 -- the suite stays green while the
+	@# check is not running at all.  That is exactly how the Skyhammer
+	@# sentinel below went inert.  Every miss is now recorded in the skip
+	@# ledger and reported in the summary at the end of this recipe.
+	@# Negative control: healthy boot should not trip the clipping detector.
+	@rom=$$(bash scripts/find-rom.sh 'Atari Karts (1995).jag' 'Atari Karts*.jag' 'Atari Karts*.j64'); \
+	if [ -n "$$rom" ]; then \
+		./test/test_audio_clipping ./$(TARGET) "$$rom" --label "Atari Karts (negative control)" --quiet; \
+	else \
+		bash scripts/test-skip.sh record "Atari Karts (clipping neg. control)" "no ROM matching 'Atari Karts*' in the private corpus"; \
+	fi
+	@# Frame-boundary discontinuity (60 Hz crackle class).  The clipping
+	@# and presence tests are both blind to this: it is neither
+	@# saturation nor silence.  Atari Karts' attract mode measured 10x
+	@# on the broken core vs 1.0x fixed; see test_audio_boundary.c.
+	@rom=$$(bash scripts/find-rom.sh 'Atari Karts (1995).jag' 'Atari Karts*.jag' 'Atari Karts*.j64'); \
+	if [ -n "$$rom" ]; then \
+		./test/test_audio_boundary ./$(TARGET) "$$rom" --label "Atari Karts (boundary)" --quiet; \
+	else \
+		bash scripts/test-skip.sh record "Atari Karts (audio boundary)" "no ROM matching 'Atari Karts*' in the private corpus"; \
+	fi
+	@# Delivered-vs-advertised sample rate.  A steady deficit drains the
+	@# frontend's audio buffer until it underruns -- a pop every few
+	@# seconds in every title.  Orthogonal to the boundary check: the
+	@# pre-2026-08 core passed this and failed that; the first fix
+	@# inverted it.  Both must hold.
+	@rom=$$(bash scripts/find-rom.sh 'Atari Karts (1995).jag' 'Atari Karts*.jag' 'Atari Karts*.j64'); \
+	if [ -n "$$rom" ]; then \
+		./test/test_audio_rate ./$(TARGET) "$$rom" --label "Atari Karts (rate)" --quiet; \
+	else \
+		bash scripts/test-skip.sh record "Atari Karts (audio rate)" "no ROM matching 'Atari Karts*' in the private corpus"; \
+	fi
+	@# Resample-cursor drift (periodic-skip class, #393).  Boundary, rate,
+	@# clipping and presence are all blind to this one: the read cursor
+	@# lags the write cursor a fraction of a sample per frame until the
+	@# gross-drift resync discards ~254 ring samples (~12 ms) in one hop
+	@# -- an audible skip every ~36 s NTSC / ~8 s PAL.  Asserts the lag
+	@# stays bounded and no resync ever fires during steady-state play.
+	@rom=$$(bash scripts/find-rom.sh 'Atari Karts (1995).jag' 'Atari Karts*.jag' 'Atari Karts*.j64'); \
+	if [ -n "$$rom" ]; then \
+		./test/tools/i2s_lag_probe ./$(TARGET) "$$rom" --frames 2400 --window 2400 --max-lag 64 --max-resyncs 0 --quiet && \
+		./test/tools/i2s_lag_probe ./$(TARGET) "$$rom" --frames 2400 --window 2400 --max-lag 64 --max-resyncs 0 --quiet --option virtualjaguar_pal=enabled; \
+	else \
+		bash scripts/test-skip.sh record "Atari Karts (i2s lag drift)" "no ROM matching 'Atari Karts*' in the private corpus"; \
+	fi
+	@# Formerly known-broken titles (DSP-synth saturation class): fixed by
+	@# the MMULT secondary-bank fix (JTRM: the vector operand is always
+	@# register bank 1, not "the non-current bank").  These now assert
+	@# clean audio so a regression flips them red again.
+	@#
+	@# NOTE: the old literal path here ("Skyhammer_(1999).jag") never matched
+	@# anything -- the corpus holds it as "Skyhammer (World).j64" -- so this
+	@# sentinel silently skipped while the suite still reported exit 0.  The
+	@# lookup below matches it case-insensitively under either spelling.
+	@#
+	@# SETTLED 2026-08-05, measured on "Skyhammer (World).j64": 0.000%
+	@# saturated, longest saturation run 0 samples, window RMS 3079.8, first
+	@# audio at frame 171.  Skyhammer no longer clips -- the MMULT
+	@# secondary-bank fix resolved it -- and it is not silent either, so it is
+	@# not the masked-silence failure mode.  Asserting clean, same as the Iron
+	@# Soldier 2 line below, is therefore correct on evidence rather than by
+	@# default.  CLAUDE.md's "Skyhammer should still fail clipping" was stale
+	@# and has been corrected.  Do NOT add an expected-fail wrapper here.
+	@rom=$$(bash scripts/find-rom.sh 'Skyhammer_(1999).jag' '*skyhammer*.jag' '*skyhammer*.j64' '*skyhammer*.rom' '*sky hammer*.jag' '*sky hammer*.j64'); \
+	if [ -n "$$rom" ]; then \
+		./test/test_audio_clipping ./$(TARGET) "$$rom" --label Skyhammer --quiet; \
+	else \
+		bash scripts/test-skip.sh record "Skyhammer (clipping sentinel)" "no ROM matching '*skyhammer*' in the private corpus"; \
+	fi
+	@rom=$$(bash scripts/find-rom.sh 'Iron Soldier 2 (World).j64' 'Iron Soldier 2*.j64' 'Iron Soldier 2*.jag'); \
+	if [ -n "$$rom" ]; then \
+		./test/test_audio_clipping ./$(TARGET) "$$rom" --label "Iron Soldier 2" --quiet; \
+	else \
+		bash scripts/test-skip.sh record "Iron Soldier 2 (clipping)" "no ROM matching 'Iron Soldier 2*' in the private corpus"; \
+	fi
+	@# Presence check: counterpart to the clipping check.  A "fix" that
+	@# silences the game (e.g. PR #170 closed without merge) drops RMS
+	@# to zero — clipping passes but the game has no audio.  Iron
+	@# Soldier 1 boots straight to a music-on title; envelope was
+	@# measured on develop (RMS ~1175).  Floor 200 catches silence
+	@# regressions; ceiling 25000 catches loud-broken regressions.
+	@# The exact 1994 dump is tried first: the envelope was measured on it,
+	@# and the [a1]/v1.04 alternates are not guaranteed to share it.
+	@rom=$$(bash scripts/find-rom.sh 'Iron Soldier (1994).jag' 'Iron Soldier (World)*.j64' 'Iron Soldier.jag'); \
+	if [ -n "$$rom" ]; then \
+		./test/test_audio_presence ./$(TARGET) "$$rom" --label "Iron Soldier 1" --rms-floor 200 --rms-ceiling 25000 --quiet; \
+	else \
+		bash scripts/test-skip.sh record "Iron Soldier 1 (audio presence)" "no ROM matching 'Iron Soldier*' in the private corpus"; \
+	fi
+	@# Same title at risc=2x (issue #314): real game audio through the DSP
+	@# with the RISC compute budget doubled.  Presence must stay inside the
+	@# measured envelope -- if 2x silences it or blows it out, the scale is
+	@# leaking into the audio path.  Same skip discipline as above.
+	@rom=$$(bash scripts/find-rom.sh 'Iron Soldier (1994).jag' 'Iron Soldier (World)*.j64' 'Iron Soldier.jag'); \
+	if [ -n "$$rom" ]; then \
+		./test/test_audio_presence ./$(TARGET) "$$rom" --label "Iron Soldier 1 (risc=2x)" --rms-floor 200 --rms-ceiling 25000 --quiet \
+			--option virtualjaguar_risc_clock_scale=2x; \
+	else \
+		bash scripts/test-skip.sh record "Iron Soldier 1 (audio presence, risc=2x)" "no ROM matching 'Iron Soldier*' in the private corpus"; \
+	fi
+	@# Club Drive under the HLE boot (#744): the 68K rewrites D_PC while
+	@# the DSP runs; when that landed right after an I2S event the DSP
+	@# restarted with IMASK stuck and the game was silent forever.  The
+	@# fix defers DSP interrupt vectoring to the DSP's next instruction.
+	@# Measured on the fix: RMS ~2949, onset frame 6 (develop: RMS 0,
+	@# no onset).  Same envelope as Iron Soldier 1 above.
+	@rom=$$(bash scripts/find-rom.sh 'Club Drive (1994).jag' 'Club Drive*.jag' 'Club Drive*.j64'); \
+	if [ -n "$$rom" ]; then \
+		./test/test_audio_presence ./$(TARGET) "$$rom" --label "Club Drive (HLE)" --rms-floor 200 --rms-ceiling 25000 --quiet && \
+		./test/test_audio_clipping ./$(TARGET) "$$rom" --label "Club Drive (HLE)" --quiet; \
+	else \
+		bash scripts/test-skip.sh record "Club Drive (HLE audio presence)" "no ROM matching 'Club Drive*' in the private corpus"; \
+	fi
+	@# Save-state determinism: replay the same frames after
+	@# retro_unserialize and require identical video AND audio.  This is
+	@# what backs `savestate_features = 3` in dist/info/ and the zero
+	@# serialization quirks reported from retro_load_game -- rewind,
+	@# netplay and run-ahead all assume a state is a complete snapshot.
+	@# It caught the DAC register file at F1A148-F1A157 being outside
+	@# every STATE_SAVE_BUF; yarc.j64 is in-tree so this never skips, and
+	@# a real music-on title is used when the private corpus is present.
+	./test/tools/test_runahead_determinism ./$(TARGET) test/roms/yarc.j64 --quiet
+	@# DSP idle-loop fast-forward (#569): the admission rule must reject a
+	@# compound period that hides an undecoded store behind a not-taken jr
+	@# plus a jump back to the loop head -- and must still fire on a
+	@# genuinely idle loop, so a silently-disabled feature cannot pass.
+	@# Hand-assembles both shapes into DSP RAM; needs no ROM but yarc.
+	./test/tools/dsp_idle_probe_falsify ./$(TARGET) test/roms/yarc.j64 --quiet
+	@# GPU port of the same admission rule (issue #569).  The GPU's
+	@# executed-path identity is opcost == idleBodyCount (its inlined
+	@# delay slots are NOT counted, unlike the DSP's +1), so this pins
+	@# both directions: a genuine loop must still fire (a +1 off-by-one
+	@# would silently disable the feature) and the compound-period
+	@# store-hiding exploit must still be rejected.
+	./test/tools/gpu_idle_probe_falsify ./$(TARGET) test/roms/yarc.j64 --quiet
+	@# The fast-forward is exact under any RISC clock scale (it used to be
+	@# switched off at != 1x): same machine, same scale, skip on vs off must
+	@# produce byte-identical per-frame state digests (framebuffer, audio,
+	@# GPU + DSP registers / PC / opcode counts, periodic savestate), and the
+	@# on arm must really have fired on both processors (--require-fires) so
+	@# "identical" cannot be vacuous.  A skip that mis-scales its cost shows
+	@# up as a diverging loop counter.  yarc.j64 is in-tree: never skips.
+	@d=$$(mktemp -d) || exit 1; \
+	for sc in 0.5x 1.5x 2x; do \
+		echo "idle_skip_scale_ab: RISC clock scale $$sc"; \
+		./test/tools/idle_skip_scale_ab ./$(TARGET) test/roms/yarc.j64 --quiet \
+			--csv $$d/off.csv --option virtualjaguar_risc_clock_scale=$$sc \
+			--option virtualjaguar_risc_idle_skip=disabled || { rm -rf $$d; exit 1; }; \
+		./test/tools/idle_skip_scale_ab ./$(TARGET) test/roms/yarc.j64 --quiet \
+			--csv $$d/on.csv --require-fires --option virtualjaguar_risc_clock_scale=$$sc \
+			--option virtualjaguar_risc_idle_skip=enabled || { rm -rf $$d; exit 1; }; \
+		cmp $$d/off.csv $$d/on.csv || { echo "FAIL: skip on != skip off at $$sc"; rm -rf $$d; exit 1; }; \
+	done; rm -rf $$d
+	@# Texture dump mode (issue #369): identity-contract freeze vs the
+	@# committed golden list, determinism, fast/accurate engine
+	@# independence, machine inertness (fb hashes + savestate digests
+	@# on vs off), PNG validity, and the bytes-only-identity palette
+	@# check.  yarc.j64 is in-tree so this never skips; the synthetic
+	@# blit battery inside the tool covers every bpp (see the tool
+	@# header for why a ROM run alone is a 2-hash tripwire).
+	./test/tools/test_texdump ./$(TARGET) test/roms/yarc.j64 --quiet
+	@# Texture replacement gates (#369 deliverable 2): no-pack and
+	@# with-pack machine inertness (fb hashes + savestate digests +
+	@# battery destination RAM), shadow-framebuffer presentation of a
+	@# first-principles synthetic pack, and determinism.
+	./test/tools/test_texreplace ./$(TARGET) test/roms/yarc.j64 --quiet
+	@rom=$$(bash scripts/find-rom.sh 'Iron Soldier (1994).jag' 'Iron Soldier (World)*.j64' 'Iron Soldier.jag'); \
+	if [ -n "$$rom" ]; then \
+		./test/tools/test_runahead_determinism ./$(TARGET) "$$rom" --quiet; \
+	else \
+		bash scripts/test-skip.sh record "Iron Soldier 1 (savestate determinism)" "no ROM matching 'Iron Soldier*' in the private corpus"; \
+	fi
+	@# Issue #400: the two ROMs above are both stock-path titles, so nothing
+	@# here exercised a title carrying per-title enhancement defaults — and
+	@# the hi-res shadow surface's frame epoch was outside the state blob for
+	@# exactly that reason.  Doom takes internal_resolution=2x + true_color
+	@# from titledb, so this row is the one that fails if a cache-coherence
+	@# counter escapes serialization again.  Keep a DB-tagged title here.
+	@rom=$$(bash scripts/find-rom.sh 'Doom - Evil Unleashed (1994).jag' 'Doom (World)*.j64' 'Doom.jag'); \
+	if [ -n "$$rom" ]; then \
+		./test/tools/test_runahead_determinism ./$(TARGET) "$$rom" --quiet; \
+	else \
+		bash scripts/test-skip.sh record "Doom (savestate determinism, enhancement path)" "no ROM matching 'Doom*' in the private corpus"; \
+	fi
+	@# Issue #787: the HLE CD BIOS streams CD_read data at drive rate from
+	@# state that used to live outside the blob, so every HLE disc diverged
+	@# under run-ahead while a read was in flight.  Warmup 400 lands
+	@# mid-stream on Hover Strike's intro (failed all four checks pre-fix).
+	@rom=$$(bash scripts/find-rom.sh 'Hover Strike - Unconquered Lands (USA).cue'); \
+	if [ -n "$$rom" ]; then \
+		./test/tools/test_runahead_determinism ./$(TARGET) "$$rom" --warmup 400 --frames 120 --quiet; \
+	else \
+		bash scripts/test-skip.sh record "Hover Strike CD (HLE savestate determinism, #787)" "no disc matching 'Hover Strike - Unconquered Lands (USA).cue' in the private corpus"; \
+	fi
+	@# Issue #804: the same disc on the REAL-BIOS path.  The boot-stub-injected
+	@# flag (jagcd_bios.c) and the BUTCH FIFO refill accumulator (cdrom.c) lived
+	@# outside the blob, so a rollback across the stub injection never injected
+	@# it and the replay diverged ~40 frames in (failed video_replay_identical
+	@# and state_reconverges pre-fix).  The explicit boot-mode option is what
+	@# selects the BIOS path -- `--bios` only toggles the cart boot ROM.
+	@rom=$$(bash scripts/find-rom.sh 'Hover Strike - Unconquered Lands (USA).cue'); \
+	if [ -n "$$rom" ]; then \
+		./test/tools/test_runahead_determinism ./$(TARGET) "$$rom" --option virtualjaguar_cd_boot_mode=bios --warmup 400 --frames 120 --quiet; \
+	else \
+		bash scripts/test-skip.sh record "Hover Strike CD (real-BIOS savestate determinism, #804)" "no disc matching 'Hover Strike - Unconquered Lands (USA).cue' in the private corpus"; \
+	fi
+	./test/test_butch_cd
+	./test/test_cd_hle_idempotent
+	./test/test_cd_pregap
+	./test/test_cd_chd
+	./test/test_chd_unit
+	@# Checker on the committed fixtures: exit 0 = CHSE present, exit 1 =
+	@# Jaguar-shaped and missing CHSE. This is the ParseCHD refuse gate
+	@# without going through HLE extract.
+	./tools/jagcd/jagcd-chd-check test/roms/synth_jagcd.chd
+	@if ./tools/jagcd/jagcd-chd-check test/roms/synth_jagcd_nosession.chd; then \
+		echo "jagcd-chd-check: expected exit 1 on synth_jagcd_nosession.chd"; exit 1; \
+	 else rc=$$?; \
+	   if [ $$rc -ne 1 ]; then echo "jagcd-chd-check: unexpected $$rc"; exit $$rc; fi; \
+	 fi
+	@# exit 2 = virtual pregaps present (a warning, still a valid CHD).
+	@./tools/jagcd/jagcd-chd-check test/roms/synth_jagcd_vpregap.chd >/dev/null; \
+	 rc=$$?; if [ $$rc -ne 2 ]; then \
+	   echo "jagcd-chd-check: expected exit 2 on synth_jagcd_vpregap.chd, got $$rc"; exit 1; \
+	 fi
+	@# Optional: PATH/JAGCD_CHDMAN round-trip. Exit 77 = no CHSE-capable
+	@# chdman (CI, Homebrew 0.288). The committed synth_jagcd*.chd files
+	@# are the actual CHD load gate; this only checks the converter.
+	@if bash test/tools/jagcd_roundtrip.sh; then :; \
+	 else rc=$$?; \
+	   if [ $$rc -eq 77 ]; then \
+	     bash scripts/test-skip.sh record "jagcd CUE->CHD round-trip" "no CHSE-capable chdman on PATH"; \
+	   else exit $$rc; fi; \
+	 fi
+	./test/test_cd_synth_read
+	./test/test_cd_synth_butch
+	./test/test_cd_synth_cdda
+	./test/test_cd_synth_subq
+	@# VJ_BIOS_DIR: both tests used to hardcode "test/roms/private" as the
+	@# libretro system dir, but the corpus keeps its BIOS dumps one level
+	@# down in ROMS/.  The paths never resolved, so ten real-BIOS assertions
+	@# reported SKIP while the suite exited 0 -- the same silent-skip class
+	@# as the Skyhammer sentinel.  Resolve the directory that actually holds
+	@# the Jaguar BIOS and hand it to both tests; they fall back to the old
+	@# literal when the variable is unset (CI, which has no BIOS dumps).
+	@bios=$$(bash scripts/find-rom.sh '*BIOS* Atari Jaguar (World).j64'); \
+	if [ -n "$$bios" ]; then \
+		VJ_BIOS_DIR=$$(dirname "$$bios"); export VJ_BIOS_DIR; \
+	else \
+		bash scripts/test-skip.sh record "Real-BIOS assertions (bios/boot config)" "no '[BIOS] Atari Jaguar (World).j64' in the private corpus"; \
+	fi; \
+	./test/test_bios_config && ./test/test_boot_config
+	./test/test_cart_format ./$(TARGET)
+	./test/test_cart_needs_bios ./$(TARGET) --quiet
+	./test/test_crash_detect_cd_wedge ./$(TARGET)
+	./test/test_crash_detect_inframe ./$(TARGET)
+	@# Uploaded-executable ILLEGAL park (#800).  The synthetic raw binary
+	@# needs no ROM and always runs; DEMO1B is the measured reproducer
+	@# (it hung retro_run forever under the accurate blitter).  The tool
+	@# forces the accurate blitter and arms its own wall-clock alarm.
+	./test/tools/test_upload_illegal_park ./$(TARGET)
+	@# A blit hardware never finishes (#800/#794) hangs the emulated
+	@# blitter, never the host: synthetic never-ending blit under both
+	@# engines (returns, B_CMD busy, starts ignored, reset clears,
+	@# savestate restores).  Both measured reproducers are gone: Music
+	@# Demo (ScatoLOGIC) --bios (#794) sprayed the blitter only from a
+	@# $$1000-low load address (#818, now a raw-binary boot check below), and
+	@# Native Demo (bin) HLE reached its blit only through a GPU runaway
+	@# into data that the #611 NORMI fix reshuffled.  The synthetic test
+	@# covers both engines.
+	./test/tools/test_blitter_hung ./$(TARGET)
+	./test/tools/test_blitter_hung ./$(TARGET) --fast
+	@rom=$$(bash scripts/find-rom.sh 'DEMO1B (PD) [[]a1[]].jag' 'DEMO1B (PD).jag' 'DEMO1B*.jag'); \
+	if [ -n "$$rom" ]; then \
+		./test/tools/test_upload_illegal_park ./$(TARGET) --rom "$$rom" --frames 600; \
+	else \
+		bash scripts/test-skip.sh record "Upload ILLEGAL park (DEMO1B, accurate blitter)" "no ROM matching 'DEMO1B*' in the private corpus"; \
+	fi
+	@# Cart mirroring (#851): a 2 MiB cart repeats at $$A00000, and Flip Out
+	@# reads $$A02000 expecting its own bytes.  The ROM-free mirror cases live
+	@# in test_cart_format; this is the game that needed them, in HLE and BIOS.
+	@rom=$$(bash scripts/find-rom.sh 'Flip Out (1995).jag' 'Flip Out*.jag'); \
+	if [ -n "$$rom" ]; then \
+		./test/tools/test_flipout_851 ./$(TARGET) --rom "$$rom" --frames 1000 && \
+		./test/tools/test_flipout_851 ./$(TARGET) --rom "$$rom" --frames 1000 --bios; \
+	else \
+		bash scripts/test-skip.sh record "Cart mirror (Flip Out, #851)" "no ROM matching 'Flip Out*' in the private corpus"; \
+	fi
+	@# BIOS-mode power-on RAM (#856): Fight For Your Life sizes a fill from
+	@# $$F9A90, which it never writes; a per-word PRNG value there wrecked the
+	@# GPU job.  Exact good-dump name only: the [a1] bad dump is an authentic
+	@# BIOS reject and would pass vacuously (the test also checks the CRC).
+	@rom=$$(bash scripts/find-rom.sh 'Fight For Your Life (1996).jag'); \
+	if [ -n "$$rom" ]; then \
+		./test/tools/test_ffyl_856 ./$(TARGET) --rom "$$rom" --frames 1400; \
+	else \
+		bash scripts/test-skip.sh record "BIOS power-on RAM (Fight For Your Life, #856)" "no 'Fight For Your Life (1996).jag' in the private corpus"; \
+	fi
+	@# GPU long-store alignment (#866): Ruiner Pinball patches movei immediates
+	@# through store (r15+rn) at word-aligned GPU RAM addresses; the GPU used to
+	@# escape into DSP RAM at frame ~56.  Exact good-dump name (CRC checked).
+	@rom=$$(bash scripts/find-rom.sh 'Ruiner Pinball (1995).jag'); \
+	if [ -n "$$rom" ]; then \
+		./test/tools/test_ruiner_866 ./$(TARGET) --rom "$$rom" --frames 600 && \
+		./test/tools/test_ruiner_866 ./$(TARGET) --rom "$$rom" --frames 600 --bios; \
+	else \
+		bash scripts/test-skip.sh record "GPU store alignment (Ruiner Pinball, #866)" "no 'Ruiner Pinball (1995).jag' in the private corpus"; \
+	fi
+	@# Raw-binary load address (#818): all three are linked at $$5000, which
+	@# the containment scorer used to resolve to $$4000 (black screen, 68K
+	@# parked on ILLEGAL; Music Demo --bios sprayed the blitter, #794).
+	@# The ROM-free cases live in test_cart_format.
+	@rom=$$(bash scripts/find-rom.sh 'Chroma-Luma Color Pick by Matthias Domin (bin)*' 'Chroma-Luma*(bin)*'); \
+	if [ -n "$$rom" ]; then \
+		./test/tools/test_raw_binary_boot ./$(TARGET) --rom "$$rom" --expect-base 0x5000 && \
+		./test/tools/test_raw_binary_boot ./$(TARGET) --rom "$$rom" --expect-base 0x5000 --bios; \
+	else \
+		bash scripts/test-skip.sh record "Raw binary at \$$5000 (Chroma-Luma (bin), #818)" "no ROM matching 'Chroma-Luma*(bin)*' in the private corpus"; \
+	fi
+	@rom=$$(bash scripts/find-rom.sh 'JagMania (Jul 8)*' 'JagMania*Jul 8*'); \
+	if [ -n "$$rom" ]; then \
+		./test/tools/test_raw_binary_boot ./$(TARGET) --rom "$$rom" --expect-base 0x5000 && \
+		./test/tools/test_raw_binary_boot ./$(TARGET) --rom "$$rom" --expect-base 0x5000 --bios; \
+	else \
+		bash scripts/test-skip.sh record "Raw binary at \$$5000 (JagMania (Jul 8), #818)" "no ROM matching 'JagMania (Jul 8)*' in the private corpus"; \
+	fi
+	@rom=$$(bash scripts/find-rom.sh 'Music Demo (2002) (ScatoLOGIC).jag' 'Music Demo*.jag'); \
+	if [ -n "$$rom" ]; then \
+		./test/tools/test_raw_binary_boot ./$(TARGET) --rom "$$rom" --expect-base 0x5000 && \
+		./test/tools/test_raw_binary_boot ./$(TARGET) --rom "$$rom" --expect-base 0x5000 --bios; \
+	else \
+		bash scripts/test-skip.sh record "Raw binary at \$$5000 (Music Demo, #794/#818)" "no ROM matching 'Music Demo*' in the private corpus"; \
+	fi
+	@rom=$$(bash scripts/find-rom.sh 'Native Demo (bin) (1997)*' 'Native Demo*(bin)*'); \
+	if [ -n "$$rom" ]; then \
+		./test/tools/test_raw_binary_boot ./$(TARGET) --rom "$$rom" --expect-base 0x5000 && \
+		./test/tools/test_raw_binary_boot ./$(TARGET) --rom "$$rom" --expect-base 0x5000 --bios; \
+	else \
+		bash scripts/test-skip.sh record "Raw binary at \$$5000 (Native Demo (bin), #866)" "no ROM matching 'Native Demo (bin)*' in the private corpus"; \
+	fi
+	@# Club Drive GPU runaway (#611): NORMI was one too high, so the clip
+	@# corner table lookup rotated every inserted screen corner; steering
+	@# from the mid-race state ran the GPU into main RAM by frame 82.  The
+	@# user's RetroArch state is rzip-compressed, so extract it first.
+	@rom=$$(bash scripts/find-rom.sh 'Club Drive (1994).jag' 'Club Drive*.jag' 'Club Drive*.j64'); \
+	state="test/roms/private/states/Club Drive (1994).state3"; \
+	if [ -n "$$rom" ] && [ -f "$$state" ]; then \
+		raw=$$(mktemp /tmp/vj_club_drive_611.XXXXXX) && \
+		python3 scripts/rzip_extract.py "$$state" "$$raw" >/dev/null && \
+		./test/tools/test_club_drive_611 ./$(TARGET) "$$rom" --load-state "$$raw"; \
+		rc=$$?; rm -f "$$raw"; [ $$rc -eq 0 ]; \
+	else \
+		bash scripts/test-skip.sh record "Club Drive GPU stays local (#611)" "no 'Club Drive*' ROM or states/Club Drive (1994).state3 in the private corpus"; \
+	fi
+	@# Timing-campaign S0 gates (docs/timing-campaign-plan.md, #408/#401).
+	@# TRACKING gates: the expected values in test/tools/timing_gate_baseline.txt
+	@# are today's numbers, recorded beside the silicon target (Doom 4.0
+	@# fields/flip, #434).  A regression -- moving AWAY from the target, or a
+	@# liveness-floor breach -- fails; the tools exit 77 when the ROM/state is
+	@# absent, which is recorded as a SKIP (never a pass).
+	@rom=$$(bash scripts/find-rom.sh 'Doom - Evil Unleashed (1994).jag' 'Doom (World)*.j64' 'Doom.jag'); \
+	if [ -n "$$rom" ]; then \
+		./test/tools/test_doom_pace_gate ./$(TARGET) "$$rom"; \
+		rc=$$?; \
+		if [ $$rc -eq 77 ]; then \
+			bash scripts/test-skip.sh record "Doom pace gate (S0, #408)" "ROM not loadable"; \
+		elif [ $$rc -ne 0 ]; then exit $$rc; fi; \
+	else \
+		bash scripts/test-skip.sh record "Doom pace gate (S0, #408)" "no ROM matching 'Doom*' in the private corpus"; \
+	fi
+	@rom=$$(bash scripts/find-rom.sh 'Checkered Flag (1994).jag' 'Checkered Flag*.jag' 'Checkered Flag*.j64'); \
+	state="test/roms/private/states/Checkered Flag (1994).state.auto"; \
+	if [ -n "$$rom" ] && [ -f "$$state" ]; then \
+		raw=$$(mktemp /tmp/vj_cf_canary.XXXXXX) && \
+		python3 scripts/rzip_extract.py "$$state" "$$raw" >/dev/null && \
+		./test/tools/test_cf_canary ./$(TARGET) "$$rom" --load-state "$$raw"; \
+		rc=$$?; rm -f "$$raw"; [ $$rc -eq 0 ]; \
+	else \
+		bash scripts/test-skip.sh record "Checkered Flag overcharge canary (S0, #408)" "no 'Checkered Flag*' ROM or states/Checkered Flag (1994).state.auto in the private corpus"; \
+	fi
+	./test/test_audio_dac
+	./test/tools/test_memory_map ./$(TARGET)
+	@# $F14000/$F14002 identity guardrail for the input-devices track
+	@# (#428/#429/#436): sweeps the whole joystick read domain and asserts
+	@# an FNV digest measured on develop.  Committed before any device code
+	@# so later PRs are measured against a number that predates them.
+	./test/tools/joymatrix_identity ./$(TARGET) test/roms/yarc.j64 --quiet
+	@# Team Tap (#513): the two paths joymatrix_identity structurally
+	@# cannot reach -- update_teamtap_input()'s frontend-port -> socket
+	@# fill, and the trailing v13 state chunk.  That chunk is written
+	@# LAST, so one that writes nothing at all misaligns nothing and
+	@# passes test_state_compat and test_runahead_determinism unchanged.
+	./test/tools/teamtap_ports ./$(TARGET) test/roms/yarc.j64 --quiet
+	@# Cross-load static leak (#479): a fast-blitter session must not
+	@# contaminate the savestate of the accurate session that follows it
+	@# while the core stays resident (iOS cannot dlclose).  The run1-vs-run2
+	@# control inside the tool means a failure here is attributable, not
+	@# just "the harness is not reproducible".
+	./test/tools/blitter_static_leak ./$(TARGET) test/roms/yarc.j64
+	@# Quadrature encoder unit test (no core): the Gray sequence in both
+	@# directions, the one-state-per-advance rate policy, the backlog
+	@# clamp and the Q8 carry.
+	./test/test_quadrature
+	@# ST/Amiga mouse end-to-end: synthetic deltas in, decoded direction
+	@# and distance out, all three wiring cases and all three poll shapes,
+	@# plus row-blindness and the v12 savestate round-trip.
+	./test/tools/mouse_decode_test ./$(TARGET) test/roms/yarc.j64 --quiet
+	@# Tempest rotary end-to-end (#436): synthetic rotation in, decoded
+	@# direction and magnitude out in BOTH directions on BOTH ports, the
+	@# row-0-only visibility that distinguishes a matrix device from the
+	@# row-blind mouse, Tempest 2000's measured 8-write scan, the
+	@# two-controller Pause unlock, the C2/C3 ID bits and a savestate
+	@# round-trip mid-rotation.
+	./test/tools/rotary_decode_test ./$(TARGET) test/roms/yarc.j64 --quiet
+	@# TR10 bank-switching analog / driving controller (#437): NO RELEASED
+	@# TITLE reads this protocol, so this synthetic register-level suite IS
+	@# the device's verification (the tool's header says so at length): a
+	@# TR10-faithful driver scans both banks out of $F14000/$F14002 and
+	@# asserts the layout, the bank cycling (incl. other-socket interleave
+	@# immunity), the type ID bits, the engagement guardrail, the absolute
+	@# tuning semantics and the extended v12 savestate chunk.
+	./test/tools/analog_decode_test ./$(TARGET) test/roms/yarc.j64 --quiet
+	@# Motherboard paddle ADC at $$F17C00 (#505): the three reading states
+	@# (no converter fitted / fitted but that socket empty / live axis),
+	@# the channel|4 single-ended MUX select, BattleSphere's own Timer 1
+	@# round robin landing each channel in its own slot, the UN-inverted Y
+	@# its calibrator implies, the joystick matrix staying bit-identical to
+	@# a pad, and the latched-conversion savestate.
+	./test/tools/paddle_decode_test ./$(TARGET) test/roms/yarc.j64 --quiet
+	@# Pro Controller (#514): the five extra buttons (X/Y/Z fire, Left/Right
+	@# shoulder) alias onto keypad 9/8/7/4/6 -- Atari's own SDK header and
+	@# developer newsletter, docs/teamtap-procontroller-spike.md section 9,
+	@# NOT the TR10 manual, which never mentions the device.  No decode
+	@# change was needed (src/jerry/joystick.c is untouched), so this
+	@# register-level suite is what pins the claim: pressing each of the
+	@# five slots clears exactly the predicted $F14000 bit on its own row
+	@# and moves nothing else, on both ports.
+	./test/tools/procontroller_decode_test ./$(TARGET) test/roms/yarc.j64 --quiet
+	./test/tools/sixd_decode_test ./$(TARGET) test/roms/yarc.j64 --quiet
+	@# Light gun (#438).  The register-level half (LPH/LPV transform,
+	@# off-screen freeze, and the 1x-vs-2x identity that keeps the
+	@# internal-resolution option out of the aim) runs on the in-tree public
+	@# ROM and is never skipped.  The Balloons half -- its own two-target
+	@# calibration screen, a full-width sweep proving the game's decode of
+	@# our LPH lands on the pixel aimed at, and a scripted balloon kill --
+	@# needs the private corpus; the tool exits 77 for that and the skip is
+	@# ledgered rather than passing silently.
+	@rom=$$(bash scripts/find-rom.sh 'BALLOONS.BIN' 'Balloons*.bin' 'Balloon*.bin'); \
+	if [ -n "$$rom" ]; then \
+		./test/tools/test_lightgun ./$(TARGET) "$$rom"; \
+	else \
+		bash scripts/test-skip.sh record "Light gun Balloons calibration + hit (#438)" "no ROM matching 'BALLOONS.BIN' in the private corpus"; \
+		./test/tools/test_lightgun ./$(TARGET) /nonexistent/BALLOONS.BIN; \
+		st=$$?; [ $$st = 0 ] || [ $$st = 77 ]; \
+	fi
+	@# Per-axis input tuning (#439), no core: the identity at defaults over
+	@# the whole int16 range, the dead zone as a gate rather than a re-base,
+	@# the curve's fixed point at QUAD_MAX_BACKLOG and its exact values.
+	./test/test_axistune
+	@# ...and the same feature measured end to end through $F14000: the
+	@# digital pad is bit-identical with tuning at ANY setting, the analog
+	@# paths are bit-identical at defaults, and a non-default tuning does
+	@# move the analog digest (the negative control that stops the two
+	@# equalities passing on a disconnected layer).
+	./test/tools/tuning_identity ./$(TARGET) test/roms/yarc.j64 --quiet
+	./test/test_memtrack
+	./test/test_nvmbios
+	@# Option visibility is content-type dependent; the disc half runs only
+	@# when a private CD image is available (the cart half always runs).
+	@# Prefer a disc known to load (see docs/cd-boot-matrix.md); fall back to
+	@# whatever is present. A disc that will not load is reported as SKIP.
+	@# Try discs known to load first (see docs/cd-boot-matrix.md), then any
+	@# other. ls sorts all its arguments together, so probe one glob at a
+	@# time. A disc that still will not load is reported as SKIP, not FAIL.
+	@# The jagniccc.j64 guard that used to wrap this is gone: that ROM is
+	@# committed in-tree, so its absence means a broken checkout and must
+	@# fail the suite rather than read as a pass -- the same rationale the
+	@# test_state_compat and test_frontend_pacing lines below already state.
+	@# The disc half always runs against the in-tree synth_jagcd.chd (#850),
+	@# so CI covers the CD side; a private rip is an extra pass that records a
+	@# ledger skip when absent, so "ran without a disc" stays distinguishable.
+	@VJ_VIS_ROOT="test/roms/private/Jaguar CD/BinCue"; VJ_VIS_DISC=""; \
+		for VJ_VIS_PAT in "Baldies*" "Myst*" "Hover*" "*"; do \
+			[ -n "$$VJ_VIS_DISC" ] && break; \
+			VJ_VIS_DISC=$$(ls "$$VJ_VIS_ROOT"/$$VJ_VIS_PAT/*.cue 2>/dev/null | head -1); \
+		done; \
+		./test/tools/test_option_visibility ./$(TARGET) test/roms/jagniccc.j64 test/roms/synth_jagcd.chd --strict || exit 1; \
+		if [ -z "$$VJ_VIS_DISC" ]; then \
+			bash scripts/test-skip.sh record "Core option visibility (private-disc half)" "no .cue image under test/roms/private/Jaguar CD/BinCue"; \
+		else \
+			./test/tools/test_option_visibility ./$(TARGET) test/roms/jagniccc.j64 "$$VJ_VIS_DISC"; \
+		fi
+	./test/tools/test_op_gpu_object ./$(TARGET) test/roms/yarc.j64
+	@# Framebuffer integrity: alpha corruption + screen position shift detection.
+	@# Run both regions: max_height is region-independent, but the emitted
+	@# height is not, so a region-specific overflow must not hide.
+	@# Chained with && so an NTSC failure cannot be masked by a passing PAL
+	@# run -- with `;` the block would still exit 0 on the second command.
+	@# Unguarded on purpose: yarc.j64 is committed in-tree, so a missing file
+	@# is a broken checkout, not an absent optional ROM.  The `[ -f ]` guard
+	@# that used to wrap this printed a SKIP and exited 0, which is the same
+	@# reads-as-a-pass hazard test_state_compat below explicitly refuses.
+	./test/test_framebuffer_integrity ./$(TARGET) test/roms/yarc.j64
+	./test/test_framebuffer_integrity ./$(TARGET) test/roms/yarc.j64 \
+		--option virtualjaguar_pal=enabled
+	@# Save-state version gate: every layout a released core wrote (v1, v2,
+	@# v3, v7) must still load with its chunks correctly aligned; version 0
+	@# and future versions must be refused.  Deliberately NOT wrapped in an
+	@# `if [ -f ... ]` guard like the framebuffer test above: yarc.j64 is
+	@# committed in-tree, so a missing ROM is a broken checkout and the
+	@# test's exit 77 should stop the suite rather than read as a pass.
+	./test/test_state_compat ./$(TARGET) test/roms/yarc.j64
+	@# Jaguar GameDrive detection + banking + savestate v8 gate.  Fully
+	@# synthetic (builds its own probe images), so it runs everywhere,
+	@# including checkouts without the private ROM tree.
+	./test/test_jgd ./$(TARGET)
+	@# GameDrive SD-card layer (#783): open dispositions, read-only card,
+	@# sandbox refusals, FILINFO layout, directories, savestate restore that
+	@# never truncates.  Host-only (no core), runs everywhere.
+	./test/test_jaggd_fs
+	@# Frontend pacing / fast-forward contract: the core must not throttle
+	@# itself, and samples-per-frame must match the advertised fps and
+	@# sample_rate, otherwise the frontend's audio driver becomes the pacing
+	@# bottleneck and fast-forward has nothing to give.  Unguarded for the
+	@# same reason as test_state_compat above: yarc.j64 is committed in-tree,
+	@# so a missing ROM means a broken checkout and should fail the suite
+	@# rather than silently read as a pass.
+	./test/test_frontend_pacing ./$(TARGET) test/roms/yarc.j64 --quiet
+	@# Private frontend event channel: a frontend that refuses HELLO (RetroArch)
+	@# is never sent an event; one that answers gets LINK_UP.  Plus the free-form
+	@# clock-scale percentage parser (list values unchanged).
+	./test/test_frontend_ext ./$(TARGET) test/roms/yarc.j64 --quiet
+	@# App debug interface (src/debug/vj_debug_iface.h): only a frontend that asks
+	@# gets it; peek == the core's RAM; the poke policy; halt/step/continue/detach
+	@# through a scripted host; OP snapshot; blit log; and a frame + RAM digest that
+	@# is identical with everything switched on.
+	./test/test_debug_iface ./$(TARGET) test/roms/yarc.j64 --quiet
+	@# Clock-scale (issue #314) audio-pacing contract at non-1x.  The one
+	@# invariant the scale options must never break is sample pacing:
+	@# I2S/DAC event scheduling stays on the unscaled sysclock, so the
+	@# audio_rate_contract (exactly 48000/fps samples per frame, 1:1
+	@# batches) must hold at every scale -- a violation here is a pitch
+	@# shift, the PR #170 regression class.  yarc.j64 is committed
+	@# in-tree, so these run everywhere including CI.  The m68k=0.5x row
+	@# also exercises the underclock error-diffusion path (zero-budget
+	@# slices must skip, not execute).
+	@# --max-fastest-frame-fraction 100 defuses the host-speed check on
+	@# these rows only: at 2x/2x the emulator does ~double the work per
+	@# frame, so "fastest frame < 0.5x period" is a property of the host,
+	@# not of the scale options, and would flake on loaded CI runners
+	@# (observed locally: 11.3 ms vs the 8.3 ms limit under parallel
+	@# builds).  The assertions that matter here -- audio_rate_contract,
+	@# one_batch_per_frame, geometry_stability -- keep full strength.
+	./test/test_frontend_pacing ./$(TARGET) test/roms/yarc.j64 --quiet \
+		--max-fastest-frame-fraction 100 \
+		--option virtualjaguar_risc_clock_scale=2x \
+		--option virtualjaguar_m68k_clock_scale=2x
+	./test/test_frontend_pacing ./$(TARGET) test/roms/yarc.j64 --quiet \
+		--max-fastest-frame-fraction 100 \
+		--option virtualjaguar_m68k_clock_scale=0.5x
+	@# EEPROM lifecycle test: generates a test ROM, then exercises load/unload/reload.
+	@# EEPROM_GEN_TOOL / EEPROM_FIXTURE are per-process (see the `test:`
+	@# target-specific variable above) so two concurrent `make test` runs
+	@# don't recompile/overwrite each other's generator binary or fixture.
+	@$(CC) -O2 -Wall -o $(EEPROM_GEN_TOOL) test/tools/gen_eeprom_test_rom.c && \
+		$(EEPROM_GEN_TOOL) $(EEPROM_FIXTURE) && \
+		./test/test_eeprom_lifecycle ./$(TARGET) $(EEPROM_FIXTURE)
+	@# EEPROM read-race test: joystick polls must not steal EEPROM DO bits
+	@# (Raiden background-music death regression).
+	./test/test_eeprom_read_race ./$(TARGET) $(EEPROM_FIXTURE)
+	@rm -f $(EEPROM_GEN_TOOL) $(EEPROM_FIXTURE)
+	@# Per-title enhancement defaults DB E2E (#368): apply / disable /
+	@# user-override contract, driven through the real dlopen'd core.
+	@# Cases 9-12 extend it to the enhancement profile (P9): performance
+	@# suppresses the DB defaults, an explicit user option beats the
+	@# profile, quality applies them, and the 'auto' runtime demotion
+	@# drops them mid-session on sustained synthetic underrun reports.
+	@# Cases 13/14 cover the compatibility row class (#748): never dropped
+	@# by the enhancement profile, never beats an explicit user choice.
+	@# Cases 7/8 extend this to the negative/known-bad entry class (#464):
+	@# refuse-the-default / honour-and-warn-the-user, via a
+	@# programmatically-installed row (TitleDBSetNegativeForTest) so the
+	@# shipped table stays at zero negative rows, same reasoning as the
+	@# hooks[] gate test below.
+	@# shadowHiresN is fixed for the whole session at retro_load_game
+	@# time, so each case is a separate process invocation -- exactly
+	@# like a real frontend restart.  The seed CRC (0xDC187F82) is
+	@# verified against the actual ROM bytes first: a corpus rip that
+	@# does not match the seed would otherwise make the test "pass"
+	@# without ever exercising the DB lookup it claims to test.
+	@avp=$$(bash scripts/find-rom.sh 'Alien vs Predator (1994).jag' '*Alien*Predator*.jag' '*Alien*Predator*.j64'); \
+	if [ -n "$$avp" ]; then \
+		avp_crc=$$(python3 -c "import zlib,sys; print('0x%08X' % zlib.crc32(open(sys.argv[1],'rb').read()))" "$$avp" 2>/dev/null); \
+		if [ "$$avp_crc" = "0xDC187F82" ]; then \
+			rc=0; \
+			./test/tools/test_pertitle_db ./$(TARGET) "$$avp" --case 1 --quiet || rc=1; \
+			./test/tools/test_pertitle_db ./$(TARGET) "$$avp" --case 2 --quiet \
+				--option virtualjaguar_pertitle_defaults=disabled || rc=1; \
+			./test/tools/test_pertitle_db ./$(TARGET) "$$avp" --case 3 --quiet \
+				--option virtualjaguar_pertitle_defaults=disabled \
+				--option virtualjaguar_internal_resolution=2x || rc=1; \
+			./test/tools/test_pertitle_db ./$(TARGET) "$$avp" --case 4 --quiet \
+				--option virtualjaguar_true_color=disabled || rc=1; \
+			./test/tools/test_pertitle_db ./$(TARGET) "$$avp" --case 6 --quiet || rc=1; \
+			./test/tools/test_pertitle_db ./$(TARGET) "$$avp" --case 7 --quiet || rc=1; \
+			./test/tools/test_pertitle_db ./$(TARGET) "$$avp" --case 8 --quiet \
+				--option virtualjaguar_true_color=enabled || rc=1; \
+			./test/tools/test_pertitle_db ./$(TARGET) "$$avp" --case 9 --quiet \
+				--option virtualjaguar_enhancement_profile=performance || rc=1; \
+			./test/tools/test_pertitle_db ./$(TARGET) "$$avp" --case 10 --quiet \
+				--option virtualjaguar_enhancement_profile=performance \
+				--option virtualjaguar_internal_resolution=2x || rc=1; \
+			./test/tools/test_pertitle_db ./$(TARGET) "$$avp" --case 11 --quiet \
+				--option virtualjaguar_enhancement_profile=quality || rc=1; \
+			./test/tools/test_pertitle_db ./$(TARGET) "$$avp" --case 12 --quiet || rc=1; \
+			./test/tools/test_pertitle_db ./$(TARGET) "$$avp" --case 13 --quiet \
+				--option virtualjaguar_enhancement_profile=performance || rc=1; \
+			./test/tools/test_pertitle_db ./$(TARGET) "$$avp" --case 14 --quiet \
+				--option virtualjaguar_internal_resolution=2x || rc=1; \
+			exit $$rc; \
+		else \
+			bash scripts/test-skip.sh record "Per-title defaults (AvP apply/disable/override)" \
+				"AvP ROM CRC $$avp_crc != 0xDC187F82 (seed mismatch)"; \
+		fi; \
+	else \
+		bash scripts/test-skip.sh record "Per-title defaults (AvP apply/disable/override)" \
+			"no ROM matching 'Alien vs Predator*' in the private corpus"; \
+	fi
+	@# Non-DB ROM control: no CRC match -> no substitution, [titledb] miss log fires.
+	@# yarc.j64 is committed in-tree so this case never skips.
+	./test/tools/test_pertitle_db ./$(TARGET) test/roms/yarc.j64 --case 5 --quiet
+
+	@# Option explanations (#841): OSD notices (SET_MESSAGE_EXT) and the
+	@# amended option sublabels (SET_CORE_OPTIONS_V2 re-push), asserted
+	@# through the harness's env capture.  Cases 3-5 run on the in-tree
+	@# yarc.j64 (no DB row) and never skip; case 4 is the no-notice,
+	@# no-re-push control and case 5 the mid-session change.  Case 1
+	@# (White Men Can't Jump, compatibility row) and cases 2/6 (AvP under
+	@# the performance profile; AvP with a no-op idle-skip row, as a real
+	@# frontend reports defaults) need the private corpus; AvP's CRC is checked
+	@# against the seed first, as the per-title test above does.
+	./test/tools/test_option_explain ./$(TARGET) test/roms/yarc.j64 --case 4 --quiet
+	./test/tools/test_option_explain ./$(TARGET) test/roms/yarc.j64 --case 3 --quiet \
+		--option virtualjaguar_risc_idle_skip=enabled \
+		--option virtualjaguar_dram_timing=enabled
+	./test/tools/test_option_explain ./$(TARGET) test/roms/yarc.j64 --case 11 --quiet \
+		--option virtualjaguar_risc_idle_skip=enabled \
+		--option virtualjaguar_risc_clock_scale=2x
+	./test/tools/test_option_explain ./$(TARGET) test/roms/yarc.j64 --case 5 --quiet
+	@# #850 follow-ups, all on the in-tree yarc.j64 (never skip): the runtime
+	@# demotion's OSD notice (case 7, via a synthetic enhancement row), the
+	@# restart-required sublabel marker (8), cartridge/CD option visibility
+	@# surviving a definitions re-push (9) and a frontend that refuses the
+	@# visibility call (10).
+	./test/tools/test_option_explain ./$(TARGET) test/roms/yarc.j64 --case 7 --quiet
+	./test/tools/test_option_explain ./$(TARGET) test/roms/yarc.j64 --case 8 --quiet
+	./test/tools/test_option_explain ./$(TARGET) test/roms/yarc.j64 --case 9 --quiet \
+		--option virtualjaguar_risc_idle_skip=enabled \
+		--option virtualjaguar_dram_timing=enabled
+	./test/tools/test_option_explain ./$(TARGET) test/roms/yarc.j64 --case 10 --quiet
+	@rom=$$(bash scripts/find-rom.sh "White Men Can't Jump*.jag" "*White Men Can*"); \
+	if [ -n "$$rom" ]; then \
+		wmcj_crc=$$(python3 -c "import zlib,sys; print('0x%08X' % zlib.crc32(open(sys.argv[1],'rb').read()))" "$$rom" 2>/dev/null); \
+		if [ "$$wmcj_crc" = "0x14915F20" ]; then \
+			./test/tools/test_option_explain ./$(TARGET) "$$rom" --case 1 --quiet || exit 1; \
+		else \
+			bash scripts/test-skip.sh record "Option explanations (WMCJ preset notice)" \
+				"WMCJ ROM CRC $$wmcj_crc != 0x14915F20 (seed mismatch)"; \
+		fi; \
+	else \
+		bash scripts/test-skip.sh record "Option explanations (WMCJ preset notice)" \
+			"no ROM matching '*White Men Can*' in the private corpus"; \
+	fi
+	@avp=$$(bash scripts/find-rom.sh 'Alien vs Predator (1994).jag' '*Alien*Predator*.jag' '*Alien*Predator*.j64'); \
+	if [ -n "$$avp" ]; then \
+		avp_crc=$$(python3 -c "import zlib,sys; print('0x%08X' % zlib.crc32(open(sys.argv[1],'rb').read()))" "$$avp" 2>/dev/null); \
+		if [ "$$avp_crc" = "0xDC187F82" ]; then \
+			./test/tools/test_option_explain ./$(TARGET) "$$avp" --case 2 --quiet \
+				--option virtualjaguar_risc_idle_skip=enabled \
+				--option virtualjaguar_enhancement_profile=performance || exit 1; \
+			./test/tools/test_option_explain ./$(TARGET) "$$avp" --case 6 --quiet \
+				--option virtualjaguar_risc_idle_skip=enabled || exit 1; \
+		else \
+			bash scripts/test-skip.sh record "Option explanations (AvP suppression notice)" \
+				"AvP ROM CRC $$avp_crc != 0xDC187F82 (seed mismatch)"; \
+		fi; \
+	else \
+		bash scripts/test-skip.sh record "Option explanations (AvP suppression notice)" \
+			"no ROM matching 'Alien vs Predator*' in the private corpus"; \
+	fi
+
+	@# Disk control interface (#651): boot with NO content, then hand the
+	@# core a disc through the frontend-facing callbacks.  Case 1 asserts
+	@# the RESOLVED STRATEGY moved off "none", not that the insert returned
+	@# true -- a reset against the previous disc's boot config looks
+	@# identical from outside.  Case 3 asserts a failed insert is inert.
+	@#
+	@# Case 2 (audio-only disc must land on the real CD BIOS) is NOT run:
+	@# no one-session image exists in the corpus -- every CUE carries two
+	@# REM SESSION markers and CDI headers declare numSessions=2 -- so it
+	@# would pass against a data disc for the wrong reason.  Ledgered as a
+	@# skip rather than written to look like coverage.
+	@# Case 5 (no-content boot renders AND progresses, #726) takes NO disc
+	@# and must NOT sit inside the corpus guard below.  It is the
+	@# regression cover for the bug that shipped in v3.6.0, so it has to
+	@# run on public CI and on contributor machines, which are exactly the
+	@# checkouts with no test/roms/private.  An earlier revision nested it
+	@# in the `if [ -n "$$disc" ]` block, where it silently ran nowhere but
+	@# a corpus machine.
+	./test/tools/test_disk_control ./$(TARGET) --case 5 --quiet
+	@# Case 6 (#810): the Memory Track is exposed as SAVE_RAM from the first
+	@# query of a no-content boot, and a frontend-loaded .srm reaches mtMem.
+	@# Also disc-free, so it stays outside the corpus guard for the same
+	@# reason as case 5.
+	./test/tools/test_disk_control ./$(TARGET) --case 6 --quiet
+
+	@# Baldies HLE cutscene (#738): the boot classifier PASSED this title
+	@# while it was frozen from frame ~600 (it reaches game code and is
+	@# not thrashing -- it is just waiting on a dead clock), so the cover
+	@# has to be a freeze detector.  cd_wedge_probe exits 42 on 400
+	@# identical frames after frame 300; the unpatched core froze at
+	@# ~600, so 1200 frames is decisive and cheap.  Private corpus only.
+	@bal=$$(find -L test/roms/private -iname 'Baldies*Rev 1*.cue' 2>/dev/null | head -1); \
+	if [ -n "$$bal" ]; then \
+		$(MAKE) --no-print-directory test/tools/cd_wedge_probe >/dev/null || exit 1; \
+		if ./test/tools/cd_wedge_probe ./$(TARGET) "$$bal" --frames 1200 --arm 300 --freeze-frames 400 \
+				--option virtualjaguar_cd_boot_mode=hle >/dev/null 2>&1; then \
+			echo "  PASS: [baldies_hle_cutscene_progresses] no freeze in 1200 frames (#738)"; \
+		else \
+			echo "  FAIL: [baldies_hle_cutscene_progresses] Baldies froze under HLE (#738: stream marker misaligned?)"; exit 1; \
+		fi; \
+	else \
+		bash scripts/test-skip.sh record "Baldies HLE cutscene progression (#738)" "Baldies (USA) (Rev 1).cue not in the private corpus"; \
+	fi
+
+	@# Per-title disc rows (#747): disc rows are keyed by boot-stub CRC.
+	@# A synthetic disc row on Baldies' key must reach the boot decision on
+	@# the load path (pertitle 15; 16 is the non-matching control) and on a
+	@# disk-control insert (disk_control 9; 10 is the no-row control).  Case
+	@# 17 pins the key's cross-format stability: the CUE, CHD and CDI rips
+	@# of the same pressing must all log $$82B88060.  Private corpus only.
+	@bal=$$(find -L test/roms/private -iname 'Baldies*Rev 1*.cue' 2>/dev/null | head -1); \
+	if [ -n "$$bal" ]; then \
+		rc=0; \
+		./test/tools/test_pertitle_db ./$(TARGET) "$$bal" --case 15 --quiet || rc=1; \
+		./test/tools/test_pertitle_db ./$(TARGET) "$$bal" --case 16 --quiet || rc=1; \
+		./test/tools/test_disk_control ./$(TARGET) --disc "$$bal" --case 9 --quiet || rc=1; \
+		./test/tools/test_disk_control ./$(TARGET) --disc "$$bal" --case 10 --quiet || rc=1; \
+		for r in "$$bal" \
+		         "$$(find -L test/roms/private -iname 'Baldies*Rev 1*.chd' 2>/dev/null | head -1)" \
+		         "$$(find -L test/roms/private -iname 'baldies.cdi' 2>/dev/null | head -1)"; do \
+			[ -n "$$r" ] || continue; \
+			./test/tools/test_pertitle_db ./$(TARGET) "$$r" --case 17 --quiet \
+				--expect-stub 82B88060 || rc=1; \
+		done; \
+		exit $$rc; \
+	else \
+		bash scripts/test-skip.sh record "Per-title disc rows (#747)" "Baldies (USA) (Rev 1).cue not in the private corpus"; \
+	fi
+
+	@# Xenowings in-game video (#811): the GPU's object-list swap is
+	@# `load (r0),r2 / moveq #0,r2`, which only works because the external
+	@# load lands after the moveq (JTRM p.136, TOM bug 13).  Without that
+	@# OLP=0 and every gameplay frame is black.  Then the game's
+	@# self-modifying anti-tamper check at 68K $$350C needs the 68000
+	@# prefetch queue (m68kinterface.c), or the game drops back to its
+	@# loader a few frames in.  The tool waits for the menu, presses B,
+	@# waits for the loading screen and needs 600 consecutive lit 326-wide
+	@# playfield frames with no return to the loader.  Private corpus only.
+	@rom=$$(bash scripts/find-rom.sh 'xenowings.rom' '*xenowings*.rom' '*xenowings*.j64' '*xenowings*.jag'); \
+	if [ -n "$$rom" ]; then \
+		$(MAKE) --no-print-directory test/tools/xenowings_ingame_video >/dev/null || exit 1; \
+		./test/tools/xenowings_ingame_video ./$(TARGET) "$$rom" --quiet || exit 1; \
+	else \
+		bash scripts/test-skip.sh record "Xenowings in-game video (#811)" "no ROM matching '*xenowings*' in the private corpus"; \
+	fi
+
+	@# White Men Can't Jump intro logo (#736): the game's fade-in copies
+	@# out of a buffer its GPU is still decoding and relies on each blit
+	@# freezing the 68000 (JTRM v8 p.8, p.69).  With zero-time blits only
+	@# the logo's apex survived.  The titledb row turns on the blitter
+	@# bus-time model for this title; run at DEFAULT options so the row
+	@# is what is tested.  Private corpus only.
+	@rom=$$(bash scripts/find-rom.sh "White Men Can't Jump*.jag" "*White Men Can*"); \
+	if [ -n "$$rom" ]; then \
+		$(MAKE) --no-print-directory test/tools/wmcj_intro_logo >/dev/null || exit 1; \
+		./test/tools/wmcj_intro_logo ./$(TARGET) "$$rom" --quiet || exit 1; \
+	else \
+		bash scripts/test-skip.sh record "White Men Can't Jump intro logo (#736)" "no ROM matching '*White Men Can*' in the private corpus"; \
+	fi
+
+	@# White Men Can't Jump gameplay (#736): the attract-mode match flickered
+	@# at stock speed (tears, sprites dropping out for a field) because the
+	@# GPU was made to wait out each of its own blits; the titledb row now
+	@# charges the 68000 only.  fb_flicker_probe counts frames where a third
+	@# of the picture reverts to its state two frames earlier, and frames
+	@# spliced from two neighbours, over the demo (frames 1250-1850).  The
+	@# second run is the control: blitter_timing=enabled (the old row) must
+	@# EXCEED the limits, or the metric has gone blind.  Private corpus only.
+	@rom=$$(bash scripts/find-rom.sh "White Men Can't Jump*.jag" "*White Men Can*"); \
+	if [ -n "$$rom" ]; then \
+		$(MAKE) --no-print-directory test/tools/fb_flicker_probe >/dev/null || exit 1; \
+		./test/tools/fb_flicker_probe ./$(TARGET) "$$rom" --frames 1850 --window-start 1250 --max-big 54 --max-splice 6 --quiet || exit 1; \
+		./test/tools/fb_flicker_probe ./$(TARGET) "$$rom" --frames 1850 --window-start 1250 --max-big 54 --max-splice 6 --expect-flicker --option virtualjaguar_blitter_timing=enabled --quiet || exit 1; \
+	else \
+		bash scripts/test-skip.sh record "White Men Can't Jump gameplay flicker (#736)" "no ROM matching '*White Men Can*' in the private corpus"; \
+	fi
+
+	@bash scripts/test-skip.sh record "Disk control audio-disc insert (#651)" \
+		"no one-session (Red Book) disc in the private corpus"
+	@disc=$$(find -L test/roms/private -iname '*.cdi' -o -iname '*.cue' 2>/dev/null | head -1); \
+	if [ -n "$$disc" ]; then \
+		rc=0; \
+		./test/tools/test_disk_control ./$(TARGET) --disc "$$disc" --case 1 --quiet || rc=1; \
+		./test/tools/test_disk_control ./$(TARGET) --disc "$$disc" --case 3 --quiet || rc=1; \
+		./test/tools/test_disk_control ./$(TARGET) --disc "$$disc" --case 7 --quiet || rc=1; \
+		./test/tools/test_disk_control ./$(TARGET) --disc "$$disc" --case 8 --option virtualjaguar_memory_track=disabled --quiet || rc=1; \
+		discb=$$(find -L test/roms/private -iname '*.cdi' -o -iname '*.cue' 2>/dev/null | sed -n 2p); \
+		if [ -n "$$discb" ]; then \
+			if ./test/tools/test_disk_control ./$(TARGET) --disc "$$disc" --disc-b "$$discb" --case 4 --quiet; then :; \
+			else c4=$$?; \
+				if [ $$c4 -eq 77 ]; then \
+					bash scripts/test-skip.sh record "Disk control savestate identity (#651)" "one of the two discs is a damaged rip that cannot boot"; \
+				else rc=1; fi; \
+			fi; \
+		else \
+			bash scripts/test-skip.sh record "Disk control savestate identity (#651)" "need two CD images in test/roms/private"; \
+		fi; \
+		exit $$rc; \
+	else \
+		bash scripts/test-skip.sh record "Disk control interface (#651)" \
+			"no CD image in test/roms/private"; \
+	fi
+	@# Enhancement hooks (issue #370).  All four gates run on in-repo public
+	@# content, so none of them can skip -- and hook_identity_ab.sh now
+	@# ENFORCES that rather than asserting it: it counts the ROMs it actually
+	@# compared and fails on zero, instead of exiting 0 having skipped them
+	@# all.  The hook array is installed
+	@# programmatically via TitleDBSetHooksForTest -- deliberately NOT as a
+	@# canary row in the shipped table, which would break --case 5 above.
+	./test/tools/test_hook_gate ./$(TARGET) test/roms/yarc.j64 --case on --quiet
+	./test/tools/test_hook_gate ./$(TARGET) test/roms/yarc.j64 --case off --quiet
+	./test/tools/test_hook_gate ./$(TARGET) test/roms/yarc.j64 --case mismatch --quiet
+	@# Stock-path identity: with the gate at its default AND with it turned
+	@# on (no shipped row carries a hook), the per-frame framebuffer-hash
+	@# CSVs must be byte-identical.  Epic #338's non-negotiable guardrail.
+	bash test/tools/hook_identity_ab.sh ./$(TARGET)
+	@echo ""
+	@echo "Note: test/test_cd_boot, test/test_cd_hle_boot, test/test_cd_bios_boot,"
+	@echo "test/test_cd_toc_contract (needs VJ_TOC_DISC=<image>),"
+	@echo "test/test_cd_fifo_stream, test/test_cd_second_transfer and test/test_cd_lost_wakeup"
+	@echo "(need VJ_FIFO_DISC=<image>),"
+	@echo "test/test_cd_ssi_stream (needs VJ_SSI_DISC=<image with an audio track>),"
+	@echo "and test/test_blitter (register-readback) are built but not run from"
+	@echo "'make test'. The CD sweeps walk every disc in test/roms/private/; the"
+	@echo "blitter readback tests probe register read paths that the emulator"
+	@echo "does not currently expose. Invoke them directly when validating"
+	@echo "regressions in those subsystems."
+	@# Skip roll-up.  Every optional check that did not run is listed here by
+	@# name and reason, so an inert sentinel cannot hide behind exit 0 the way
+	@# the Skyhammer clipping check did.  Non-fatal by default (CI has none of
+	@# the private ROMs); VJ_REQUIRE_ROMS=1 makes any skip a hard failure.
+	@bash scripts/test-skip.sh summary
+
+test/test_cheat: test/test_cheat.c src/core/cheat.c src/core/cheat.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cheat.c src/core/cheat.c
+
+test/test_titledb: test/tools/test_titledb.c src/core/titledb.c src/core/crc32.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_titledb.c src/core/titledb.c src/core/crc32.c
+
+# Known cart boot ROM image table unit test (issue #469). Links biosdb.c +
+# crc32.c + the two embedded boot ROM blobs directly, same no-dlopen style
+# as test_titledb: no core, no private ROMs.
+test/test_biosdb: test/tools/test_biosdb.c src/core/biosdb.c src/core/crc32.c \
+		src/bios/jagbios.c src/bios/jagbios_m.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_biosdb.c src/core/biosdb.c src/core/crc32.c \
+		src/bios/jagbios.c src/bios/jagbios_m.c
+
+# Custom cart boot ROM loader end-to-end test (issue #469): dlopens the
+# built core and drives retro_load_game() with a synthetic cart image to
+# exercise stage_cart_boot_rom()'s 'custom' path (file present, file
+# absent -> embedded-K fallback) plus a k/m-unchanged sanity check.
+test/test_cart_bios_loader: test/test_cart_bios_loader.c $(TARGET) \
+		src/bios/jagbios.c src/bios/jagbios_m.c
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cart_bios_loader.c \
+		src/bios/jagbios.c src/bios/jagbios_m.c -ldl
+
+# Enhancement-hook applier (issue #370).  Host unit test: no dlopen, no
+# ROMs.  titlehook.c's pure half takes the image as a parameter, so this
+# links with the same two-file style as test_titledb plus a handful of
+# stubbed core globals defined in the test itself.
+test/test_titlehook: test/tools/test_titlehook.c src/core/titlehook.c \
+		src/core/titledb.c src/core/crc32.c src/core/hookfile.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_titlehook.c src/core/titlehook.c \
+		src/core/titledb.c src/core/crc32.c src/core/hookfile.c
+
+# GDB Remote Serial Protocol engine (issue #652).  No emulator:
+# src/debug/gdbstub.c never dereferences a Jaguar global.
+#
+# gdbsock.c is linked too, for the bind-mode fail-closed tests (#652 LAN
+# option).  It DOES contain socket code, but none of it runs here -- the
+# tests only exercise GDBSockSetBindMode()/GDBSockGetBindMode(), which
+# touch a single static and never open a socket.  Linking the real file
+# rather than a stub is the point: it is the shipped default that must
+# be proven safe, not a copy of it.
+test/tools/test_gdbstub_proto: test/tools/test_gdbstub_proto.c src/debug/gdbstub.c \
+		src/debug/gdbsock.c
+	@# -DINLINE: gdbsock.c pulls in src/core/log.h for the refused-peer
+	@# warning, and log.h uses INLINE, which the core build supplies via
+	@# -DINLINE="inline". Test rules get no such default.
+	$(CC) -O2 -Wall -std=c99 -DINLINE=inline $(INCFLAGS) \
+		-o $@ test/tools/test_gdbstub_proto.c src/debug/gdbstub.c \
+		src/debug/gdbsock.c
+
+test/test_event_queue: test/test_event_queue.c src/core/event.c src/core/event.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_event_queue.c src/core/event.c
+
+test/test_jlink: test/test_jlink.c src/jerry/jlink.c src/jerry/jlink.h src/jerry/jlink_tcp.c src/jerry/jlink_netpacket.c src/jerry/jlink_discover.c src/jerry/voicemodem.c src/jerry/voicechat.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_jlink.c src/jerry/jlink.c src/jerry/jlink_tcp.c src/jerry/jlink_netpacket.c src/jerry/jlink_discover.c src/jerry/voicemodem.c src/jerry/voicechat.c
+
+test/test_jlink_tcp: test/test_jlink_tcp.c src/jerry/jlink.c src/jerry/jlink_tcp.c src/jerry/jlink_netpacket.c src/jerry/jlink_discover.c src/jerry/voicemodem.c src/jerry/voicechat.c src/jerry/jlink.h src/jerry/jlink_tcp.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_jlink_tcp.c src/jerry/jlink.c src/jerry/jlink_tcp.c src/jerry/jlink_netpacket.c src/jerry/jlink_discover.c src/jerry/voicemodem.c src/jerry/voicechat.c
+
+test/test_jlink_discover: test/test_jlink_discover.c src/jerry/jlink_discover.c src/jerry/jlink_discover.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) -Itest \
+		-o $@ test/test_jlink_discover.c src/jerry/jlink_discover.c
+
+test/test_voicechat: test/test_voicechat.c src/jerry/voicechat.c src/jerry/voicechat.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_voicechat.c src/jerry/voicechat.c
+
+test/tools/voicechat_pair: test/tools/voicechat_pair.c src/jerry/voicechat.c src/jerry/jlink_discover.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/voicechat_pair.c src/jerry/voicechat.c src/jerry/jlink_discover.c
+
+test/tools/test_voicechat_inertness: test/tools/test_voicechat_inertness.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_voicechat_inertness.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+test/test_jlink_netpacket: test/test_jlink_netpacket.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_jlink_netpacket.c -ldl
+
+test/test_voicemodem_netpacket: test/test_voicemodem_netpacket.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_voicemodem_netpacket.c -ldl
+
+test/test_voice_netpacket: test/test_voice_netpacket.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_voice_netpacket.c -ldl
+
+test/test_uart_loopback: test/test_uart_loopback.c src/jerry/uart.c src/jerry/uart.h src/jerry/jlink.c src/jerry/jlink_tcp.c src/jerry/jlink_netpacket.c src/jerry/jlink_discover.c src/jerry/voicemodem.c src/jerry/voicechat.c src/core/event.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_uart_loopback.c src/jerry/uart.c src/jerry/jlink.c src/jerry/jlink_tcp.c src/jerry/jlink_netpacket.c src/jerry/jlink_discover.c src/jerry/voicemodem.c src/jerry/voicechat.c src/core/event.c -lm
+
+test/test_jlink_negotiate: test/test_jlink_negotiate.c src/jerry/uart.c src/jerry/uart.h src/jerry/jlink.c src/jerry/jlink_tcp.c src/jerry/jlink_netpacket.c src/jerry/jlink_discover.c src/jerry/voicemodem.c src/jerry/voicechat.c src/core/event.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_jlink_negotiate.c src/jerry/uart.c src/jerry/jlink.c src/jerry/jlink_tcp.c src/jerry/jlink_netpacket.c src/jerry/jlink_discover.c src/jerry/voicemodem.c src/jerry/voicechat.c src/core/event.c -lm
+
+test/test_uart_core: test/test_uart_core.c test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) -Itest \
+		-o $@ test/test_uart_core.c test/harness/harness.c -ldl -lm
+
+test/test_fountain_crash: test/test_fountain_crash.c test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) -Itest \
+		-o $@ test/test_fountain_crash.c test/harness/harness.c -ldl -lm
+
+test/test_netlink_host: test/test_netlink_host.c test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) -Itest \
+		-o $@ test/test_netlink_host.c test/harness/harness.c -ldl -lm
+
+test/tools/netlink_pair: test/tools/netlink_pair.c test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) -Itest \
+		-o $@ test/tools/netlink_pair.c test/harness/harness.c -ldl -lm
+
+test/tools/voicemodem_pair: test/tools/voicemodem_pair.c test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) -Itest \
+		-o $@ test/tools/voicemodem_pair.c test/harness/harness.c -ldl -lm
+
+test/tools/netlink_latency: test/tools/netlink_latency.c test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) -Itest \
+		-o $@ test/tools/netlink_latency.c test/harness/harness.c -ldl -lm
+
+test/tools/netlink_delay_proxy: test/tools/netlink_delay_proxy.c
+	$(CC) -O2 -Wall -o $@ test/tools/netlink_delay_proxy.c
+
+test/tools/netlink_discover_probe: test/tools/netlink_discover_probe.c src/jerry/jlink_discover.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) -Itest \
+		-o $@ test/tools/netlink_discover_probe.c src/jerry/jlink_discover.c
+
+# Deliberately NOT linked against test/harness/harness.c -- this test needs
+# SET_CORE_OPTIONS_DISPLAY recording and an interceptable log callback,
+# neither of which the shared harness's environment callback provides (see
+# the file header comment for why). Standalone dlopen loader instead, same
+# shape as test/tools/test_option_visibility.c.
+test/tools/netlink_rebuild_witness: test/tools/netlink_rebuild_witness.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/netlink_rebuild_witness.c -ldl
+
+# Same standalone-loader rationale as netlink_rebuild_witness above: this one
+# additionally needs SET_MESSAGE_EXT capture (the OSD text IS the assertion).
+test/tools/netlink_mismatch_witness: test/tools/netlink_mismatch_witness.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/netlink_mismatch_witness.c -ldl
+
+# Same standalone-loader shape, and for the same reason: this test must BE
+# the frontend (it supplies perf_register/perf_start/perf_stop itself), which
+# the shared harness cannot do.  See the file header.
+test/tools/perf_iface_witness: test/tools/perf_iface_witness.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/perf_iface_witness.c -ldl
+
+test/test_dram_timing: test/test_dram_timing.c src/core/bus_arbiter.c src/core/bus_arbiter.h
+	$(CC) -O2 -Wall -std=c99 -o $@ test/test_dram_timing.c src/core/bus_arbiter.c
+
+test/tools/netlink_game: test/tools/netlink_game.c test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) -Itest \
+		-o $@ test/tools/netlink_game.c test/harness/harness.c -ldl -lm
+
+# Regression guard: textually verifies that JERRYResetPIT1/2,
+# TOMResetPIT, and JERRYGetPIT*Frequency schedule using RISC clock
+# constants (full system clock).  Catches the recurring "halve PIT
+# rate to fix Doom" bug -- see docs/jtrm-clocks-timing.md and
+# test/acid/tests/timing/pit_countdown_rate.s for the in-emulation
+# equivalent.
+test/test_pit_clock_rate: test/test_pit_clock_rate.c \
+		src/jerry/jerry.c src/tom/tom.c
+	$(CC) -O2 -Wall -std=c99 -o $@ test/test_pit_clock_rate.c
+
+# -DINLINE=inline because this compiles a core source STANDALONE, outside
+# CFLAGS: blitter_mmio.c includes src/core/log.h, which declares
+# `static INLINE`, and every other build of that file gets INLINE from the
+# core's own -DINLINE="inline".  log.h's vj_log_cb is stubbed in the test.
+test/test_blitter_mmio: test/test_blitter_mmio.c src/tom/blitter_mmio.c \
+		src/tom/blitter_internal.h src/tom/blitter.h src/core/vjag_memory.h \
+		src/core/settings.h src/core/log.h
+	$(CC) -O2 -Wall -std=c99 -DINLINE=inline $(INCFLAGS) \
+		-o $@ test/test_blitter_mmio.c src/tom/blitter_mmio.c
+
+test/test_tom_visible_window: test/test_tom_visible_window.c src/tom/tom.c \
+		src/tom/tom.h src/core/vjag_memory.h src/core/settings.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_tom_visible_window.c
+
+test/test_blitter_simd: test/test_blitter_simd.c $(BLITTER_SIMD_SRC) src/tom/blitter_simd.h \
+	$(BLITTER_SIMD_SRC:.c=.h)
+	$(CC) $(CFLAGS) -o $@ test/test_blitter_simd.c $(BLITTER_SIMD_SRC)
+
+test/test_dsp_mac40: test/test_dsp_mac40.c src/jerry/dsp_acc40.h
+	$(CC) -O2 -Wall $(INCFLAGS) -o $@ test/test_dsp_mac40.c
+
+test/test_m68k_ops: test/test_m68k_ops.c
+	$(CC) -O2 -Wall -Wno-unused-function -std=c99 $(INCFLAGS) \
+		-o $@ test/test_m68k_ops.c -ldl
+
+test/test_m68k_irq_ssp: test/test_m68k_irq_ssp.c
+	$(CC) -O2 -Wall -Wno-unused-function -std=c99 $(INCFLAGS) \
+		-o $@ test/test_m68k_irq_ssp.c -ldl
+
+test/test_m68k_prefetch: test/test_m68k_prefetch.c
+	$(CC) -O2 -Wall -Wno-unused-function -std=c99 $(INCFLAGS) \
+		-o $@ test/test_m68k_prefetch.c -ldl
+
+test/test_gpu_ops: test/test_gpu_ops.c
+	$(CC) -O2 -Wall -Wno-unused-function -std=c99 $(INCFLAGS) \
+		-o $@ test/test_gpu_ops.c -ldl
+
+test/test_dsp_ops: test/test_dsp_ops.c
+	$(CC) -O2 -Wall -Wno-unused-function -std=c99 $(INCFLAGS) \
+		-o $@ test/test_dsp_ops.c -ldl
+
+test/test_hle_bios: test/test_hle_bios.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_hle_bios.c -ldl
+
+test/test_dsp_unit: test/test_dsp_unit.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_dsp_unit.c -ldl
+
+test/test_subsystem_init: test/test_subsystem_init.c
+	$(CC) -O2 -Wall -Wno-unused-function -std=c99 $(INCFLAGS) \
+		-o $@ test/test_subsystem_init.c -ldl
+
+test/test_subsystem_timeline: test/test_subsystem_timeline.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_subsystem_timeline.c -ldl
+
+test/test_irq_cascade: test/test_irq_cascade.c
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_irq_cascade.c -ldl
+
+test/test_boot_patterns: test/test_boot_patterns.c
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_boot_patterns.c -ldl
+
+test/test_audio_pipeline: test/test_audio_pipeline.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_audio_pipeline.c -ldl -lm
+
+test/test_audio_clipping: test/test_audio_clipping.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_audio_clipping.c -ldl -lm
+
+test/test_audio_presence: test/test_audio_presence.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_audio_presence.c -ldl -lm
+
+test/test_audio_boundary: test/test_audio_boundary.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_audio_boundary.c -ldl -lm
+
+test/test_audio_rate: test/test_audio_rate.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_audio_rate.c -ldl -lm
+
+test/tools/i2s_lag_probe: test/tools/i2s_lag_probe.c test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/i2s_lag_probe.c test/harness/harness.c -ldl -lm
+
+test/test_memtrack: test/test_memtrack.c src/core/memtrack.c src/core/memtrack.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_memtrack.c src/core/memtrack.c -lm
+
+test/test_nvmbios: test/test_nvmbios.c src/core/nvmbios.c src/core/nvmbios.h \
+		src/core/memtrack.c src/core/memtrack.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_nvmbios.c src/core/nvmbios.c src/core/memtrack.c -lm
+
+test/tools/test_memory_map: test/tools/test_memory_map.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_memory_map.c -ldl
+
+# E2E behaviour test for the per-title enhancement defaults DB (#368):
+# apply / disable / user-override contract, driven through the real core
+# via the shared harness.  Needs shadowHiresN + shadowFBActive from the
+# wide test symbol set (exports-test.list / link-test.T).
+test/tools/test_disk_control: test/tools/test_disk_control.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_disk_control.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+# Freeze detector used by the Baldies HLE cutscene check below (#738).
+test/tools/cd_wedge_probe: test/tools/cd_wedge_probe.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 -I. $(INCFLAGS) \
+		-o $@ test/tools/cd_wedge_probe.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+# Xenowings in-game video (#811): state-driven menu -> gameplay check.
+test/tools/xenowings_ingame_video: test/tools/xenowings_ingame_video.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 -I. -I./test/harness $(INCFLAGS) \
+		-o $@ test/tools/xenowings_ingame_video.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+# White Men Can't Jump gameplay flicker (#736): framebuffer tear/revert metric.
+test/tools/fb_flicker_probe: test/tools/fb_flicker_probe.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 -I. -I./test/harness $(INCFLAGS) \
+		-o $@ test/tools/fb_flicker_probe.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+# White Men Can't Jump intro logo (#736): blit-vs-GPU-decoder race.
+test/tools/wmcj_intro_logo: test/tools/wmcj_intro_logo.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 -I. -I./test/harness $(INCFLAGS) \
+		-o $@ test/tools/wmcj_intro_logo.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/test_pertitle_db: test/tools/test_pertitle_db.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_pertitle_db.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+# Option explanations (#841): OSD notices + amended option sublabels.
+# gnu99, not c99: harness.c uses POSIX (dlopen/strdup/clock_gettime), which
+# glibc hides from a strictly-conforming translation unit.
+test/tools/test_option_explain: test/tools/test_option_explain.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=gnu99 $(INCFLAGS) \
+		-o $@ test/tools/test_option_explain.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+# End-to-end enhancement-hook gate wiring (issue #370).  Needs
+# TitleDBSetHooksForTest + TitleHookApplyROM + jagMemSpace from the wide
+# test symbol set (exports-test.list / link-test.T) -- note TitleHook* is
+# NOT covered by the TitleDB* wildcard and is listed separately there.
+test/tools/test_hook_gate: test/tools/test_hook_gate.c \
+		test/harness/harness.c test/harness/harness.h \
+		src/core/titledb.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_hook_gate.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+# Purpose-built microbenchmark ROM assertions (#536).  Each tool boots its
+# committed .j64 from test/microbench/ and asserts the exercised engine
+# reached its fixed iteration count, reporting the frame it finished on.
+# Needs the wide test ABI for the jaguarMainRAM export.
+test/tools/test_microbench_68k: test/tools/test_microbench_68k.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_microbench_68k.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/test_microbench_gpu_arith: test/tools/test_microbench_gpu_arith.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_microbench_gpu_arith.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/test_microbench_gpu_branch: test/tools/test_microbench_gpu_branch.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_microbench_gpu_branch.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/test_microbench_dsp: test/tools/test_microbench_dsp.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_microbench_dsp.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/test_microbench_blit: test/tools/test_microbench_blit.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_microbench_blit.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+# $F14000 / $F14002 identity guardrail (#428 input-devices track).  Needs
+# the wide test ABI's Joystick* / joypad0Buttons / joypad1Buttons exports.
+test/tools/joymatrix_identity: test/tools/joymatrix_identity.c \
+		src/jerry/inputdev.h src/jerry/joystick.h \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/joymatrix_identity.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+# Team Tap end-to-end probe (#513): reads the Joypad-TeamTap Tester's own
+# detection verdict out of main RAM.  NOT part of `make test` -- the ROM
+# is in the private corpus, so the tool exits 77 (skip) without it.  See
+# the file header for the invocation.
+test/tools/teamtap_rom_probe: test/tools/teamtap_rom_probe.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/teamtap_rom_probe.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+# Team Tap frontend plumbing + savestate chunk (#513).  Covers the two
+# paths joymatrix_identity structurally cannot: update_teamtap_input()'s
+# frontend-port -> socket fill, and the trailing v13 state chunk (which is
+# written last, so an empty one misaligns nothing and passes every other
+# state test).  Runs on the committed yarc.j64, so it IS part of `make test`.
+test/tools/teamtap_ports: test/tools/teamtap_ports.c \
+		src/jerry/joystick.h src/core/state.h \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/teamtap_ports.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+# Cross-load static-state leak gate (#479).  Pins the core with an extra
+# dlopen ref (the iOS no-dlclose regime) and proves an accurate-blitter
+# session run AFTER a fast-blitter session serialises byte-identical
+# state.  Catches BlitterStateSave()/BlitterResetDecodeState() drifting
+# apart: a newly-serialised field that nobody clears fails here.
+test/tools/blitter_static_leak: test/tools/blitter_static_leak.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/blitter_static_leak.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/mouse_decode_test: test/tools/mouse_decode_test.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/mouse_decode_test.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+# Light gun (#438).  Part A is register-level and runs on the in-tree public
+# ROM; part B drives Balloons' calibration and hit detection and exits 77
+# when that private ROM is absent.
+test/tools/test_lightgun: test/tools/test_lightgun.c \
+		src/jerry/inputdev.h \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_lightgun.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/rotary_decode_test: test/tools/rotary_decode_test.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/rotary_decode_test.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/hires_state_digest: test/tools/hires_state_digest.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/hires_state_digest.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/analog_decode_test: test/tools/analog_decode_test.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/analog_decode_test.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/paddle_decode_test: test/tools/paddle_decode_test.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/paddle_decode_test.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/procontroller_decode_test: test/tools/procontroller_decode_test.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/procontroller_decode_test.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/sixd_decode_test: test/tools/sixd_decode_test.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/sixd_decode_test.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/test_quadrature: test/test_quadrature.c src/jerry/quadrature.c src/jerry/quadrature.h
+	$(CC) -O2 -Wall $(INCFLAGS) -o $@ test/test_quadrature.c src/jerry/quadrature.c
+
+test/test_axistune: test/test_axistune.c src/jerry/axistune.c src/jerry/axistune.h \
+		src/jerry/quadrature.h
+	$(CC) -O2 -Wall $(INCFLAGS) -o $@ test/test_axistune.c src/jerry/axistune.c
+
+# #439's guardrail: needs the wide test ABI's InputDev* / Joystick* /
+# joypad0Buttons / joypad1Buttons exports.
+test/tools/tuning_identity: test/tools/tuning_identity.c \
+		src/jerry/inputdev.h src/jerry/axistune.h \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/tuning_identity.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/test_option_visibility: test/tools/test_option_visibility.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_option_visibility.c -ldl
+
+test/tools/test_op_gpu_object: test/tools/test_op_gpu_object.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_op_gpu_object.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/test_dsp_audio_diag: test/tools/test_dsp_audio_diag.c \
+		test/harness/harness.c test/harness/harness.h \
+		test/harness/dsp_probe.c test/harness/dsp_probe.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_dsp_audio_diag.c \
+		test/harness/harness.c test/harness/dsp_probe.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+test/test_eeprom_lifecycle: test/test_eeprom_lifecycle.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_eeprom_lifecycle.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+test/test_eeprom_read_race: test/test_eeprom_read_race.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_eeprom_read_race.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+test/test_framebuffer_integrity: test/test_framebuffer_integrity.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_framebuffer_integrity.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+# Save-state backwards-compatibility regression guard.  Needs DACStateSave
+# from the wide test symbol set (DAC* in exports-test.list / link-test.T).
+test/test_state_compat: test/test_state_compat.c \
+		test/harness/harness.c test/harness/harness.h src/core/state.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_state_compat.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+# Jaguar GameDrive (JagGD) detection + banking.  Synthetic-only: builds
+# its own probe cartridge images at runtime, no private ROMs needed.
+# Needs jgd*/JGD* from the wide test symbol set.
+JAGGD_FS_TEST_LC = libretro-common/streams/file_stream.c \
+	libretro-common/vfs/vfs_implementation.c \
+	libretro-common/compat/compat_strl.c libretro-common/string/stdstring.c \
+	libretro-common/encodings/encoding_utf.c libretro-common/compat/fopen_utf8.c \
+	libretro-common/file/file_path.c libretro-common/file/file_path_io.c \
+	libretro-common/time/rtime.c libretro-common/compat/compat_strcasestr.c \
+	libretro-common/compat/compat_posix_string.c
+
+test/test_jaggd_fs: test/test_jaggd_fs.c src/core/jaggd_fs.c src/core/jaggd_fs.h
+	@# gnu99, not c99: under strict ISO mode glibc hides the POSIX calls
+	@# (lstat, strdup, fileno, ftruncate) that jaggd_fs.c and the linked
+	@# libretro-common sources use, and Clang rejects the implicit decls.
+	$(CC) -O2 -std=gnu99 $(INCFLAGS) -D__LIBRETRO__ \
+		-o $@ test/test_jaggd_fs.c src/core/jaggd_fs.c $(JAGGD_FS_TEST_LC)
+
+test/test_jgd: test/test_jgd.c \
+		test/harness/harness.c test/harness/harness.h \
+		src/core/state.h src/core/jaggd.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_jgd.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+test/tools/test_runahead_determinism: test/tools/test_runahead_determinism.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_runahead_determinism.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+test/tools/test_texdump: test/tools/test_texdump.c \
+		test/harness/harness.c test/harness/harness.h src/core/crc32.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_texdump.c \
+		test/harness/harness.c src/core/crc32.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+test/tools/test_texreplace: test/tools/test_texreplace.c \
+		test/harness/harness.c test/harness/harness.h src/core/crc32.c
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_texreplace.c \
+		test/harness/harness.c src/core/crc32.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+test/tools/test_wedge_spin: test/tools/test_wedge_spin.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_wedge_spin.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+test/tools/test_music_demo_dsp_bank: test/tools/test_music_demo_dsp_bank.c \
+		test/harness/harness.c test/harness/harness.h \
+		test/harness/dsp_probe.c test/harness/dsp_probe.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_music_demo_dsp_bank.c \
+		test/harness/harness.c test/harness/dsp_probe.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+test/tools/dsp_idle_probe_falsify: test/tools/dsp_idle_probe_falsify.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/dsp_idle_probe_falsify.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+# Not built by `test`: an A/B measurement harness, not an assertion.  See
+# the header comment for how to drive an option sweep with it.
+test/tools/dsp_idle_ab: test/tools/dsp_idle_ab.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/dsp_idle_ab.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+# GPU analogs of the two tools above (issue #569, GPU port).
+test/tools/gpu_idle_probe_falsify: test/tools/gpu_idle_probe_falsify.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/gpu_idle_probe_falsify.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+# Idle-skip exactness under a non-stock RISC clock scale; run twice (skip
+# off / on) by the `test` target and the digests compared.
+test/tools/idle_skip_scale_ab: test/tools/idle_skip_scale_ab.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/idle_skip_scale_ab.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+# Not built by `test`: an A/B measurement harness, not an assertion.
+test/tools/gpu_idle_ab: test/tools/gpu_idle_ab.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/gpu_idle_ab.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+test/test_frontend_pacing: test/test_frontend_pacing.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_frontend_pacing.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+# Private frontend event channel (src/core/vj_frontend_ext.h) opt-in contract +
+# free-form clock-scale parsing.
+test/test_frontend_ext: test/test_frontend_ext.c \
+		src/core/vj_frontend_ext.h test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_frontend_ext.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+# App debug interface (src/debug/vj_debug_iface.h, src/debug/vjdebug.c) driven the
+# way the standalone app drives it: private HELLO, SET_DEBUG_IFACE, a scripted host.
+test/test_debug_iface: test/test_debug_iface.c \
+		src/debug/vj_debug_iface.h src/core/vj_frontend_ext.h \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_debug_iface.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+
+# Drives blitter_blit() through the MMIO path with varied B_CMD words and
+# checks destination bytes, plus a save-state check on the command field
+# decode (the render-inert half of it) -- see the header comment in the
+# test for why both halves are needed.
+test/test_blitter_cmd: test/test_blitter_cmd.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/test_blitter_cmd.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+# CD-specific test harnesses (imported from PR #109).  Tests SKIP gracefully
+# when no disc images are present in test/roms/private/, so CI without
+# private ROMs still passes.
+test/test_butch_cd: test/test_butch_cd.c test/test_framework.h test/mister_ground_truth.h
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_butch_cd.c -ldl
+
+test/test_bios_config: test/test_bios_config.c
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_bios_config.c -ldl
+
+test/test_boot_config: test/test_boot_config.c
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_boot_config.c -ldl
+
+test/test_cart_format: test/test_cart_format.c
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cart_format.c -ldl
+
+test/test_crash_detect_cd_wedge: test/test_crash_detect_cd_wedge.c
+	$(CC) -O2 -Wall -std=c99 -o $@ test/test_crash_detect_cd_wedge.c -ldl
+
+test/test_crash_detect_inframe: test/test_crash_detect_inframe.c
+	$(CC) -O2 -Wall -std=c99 -o $@ test/test_crash_detect_inframe.c -ldl
+
+# Uploaded-executable ILLEGAL park (#800): harness tool, needs the wide
+# test ABI for m68k_get_reg.
+# Never-ending blit -> hung emulated blitter (#800/#794).
+test/tools/test_blitter_hung: test/tools/test_blitter_hung.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_blitter_hung.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+# Club Drive GPU runaway regression (#611): harness tool, needs the wide
+# test ABI for GPUGetPC.
+test/tools/test_club_drive_611: test/tools/test_club_drive_611.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_club_drive_611.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+# Timing-campaign S0 gates (docs/timing-campaign-plan.md): Doom pace gate
+# (fields/flip + GPU busy-time) and the Checkered Flag overcharge canary.
+# Both need the wide test ABI (gpu_busy_*, jaguarMainRAM).
+test/tools/test_doom_pace_gate: test/tools/test_doom_pace_gate.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_doom_pace_gate.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+# Timing-campaign S2 bus-traffic census probe (not in `make test`: a
+# measurement tool, run by hand; needs TEST_EXPORTS=1, blitter phrase
+# counts additionally BENCH_PROFILE=1).
+test/tools/bus_census_probe: test/tools/bus_census_probe.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/bus_census_probe.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/test_cf_canary: test/tools/test_cf_canary.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_cf_canary.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/test_upload_illegal_park: test/tools/test_upload_illegal_park.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_upload_illegal_park.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/test_flipout_851: test/tools/test_flipout_851.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_flipout_851.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/test_ffyl_856: test/tools/test_ffyl_856.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_ffyl_856.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/test_ruiner_866: test/tools/test_ruiner_866.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_ruiner_866.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/tools/test_raw_binary_boot: test/tools/test_raw_binary_boot.c \
+		test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o $@ test/tools/test_raw_binary_boot.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+
+test/test_cart_needs_bios: test/test_cart_needs_bios.c test/harness/harness.c test/harness/harness.h
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cart_needs_bios.c test/harness/harness.c -ldl -lm
+
+test/test_cd_boot: test/test_cd_boot.c
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cd_boot.c -ldl
+
+test/test_cd_hle_boot: test/test_cd_hle_boot.c test/test_framework.h test/cd_assertions.h
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cd_hle_boot.c -ldl
+
+test/test_cd_pregap: test/test_cd_pregap.c test/test_framework.h test/cd_assertions.h
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cd_pregap.c -ldl
+
+test/test_cd_chd: test/test_cd_chd.c test/test_framework.h test/cd_assertions.h
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cd_chd.c -ldl
+
+test/test_cd_synth_read: test/test_cd_synth_read.c test/test_framework.h test/cd_assertions.h
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cd_synth_read.c -ldl
+
+test/test_cd_synth_butch: test/test_cd_synth_butch.c test/test_framework.h
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cd_synth_butch.c -ldl
+
+test/test_cd_synth_cdda: test/test_cd_synth_cdda.c test/test_framework.h
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cd_synth_cdda.c -ldl
+
+test/test_cd_synth_subq: test/test_cd_synth_subq.c test/test_framework.h
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cd_synth_subq.c -ldl
+
+test/test_cd_bios_boot: test/test_cd_bios_boot.c test/test_framework.h test/cd_assertions.h
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cd_bios_boot.c -ldl
+
+test/test_cd_hle_idempotent: test/test_cd_hle_idempotent.c test/test_framework.h test/cd_assertions.h
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cd_hle_idempotent.c -ldl
+
+test/test_cd_toc_contract: test/test_cd_toc_contract.c test/test_framework.h
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cd_toc_contract.c -ldl
+
+test/test_cd_fifo_stream: test/test_cd_fifo_stream.c test/test_framework.h
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cd_fifo_stream.c -ldl
+
+test/test_cd_ssi_stream: test/test_cd_ssi_stream.c test/test_framework.h
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cd_ssi_stream.c -ldl
+
+test/test_cd_second_transfer: test/test_cd_second_transfer.c test/test_framework.h
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cd_second_transfer.c -ldl
+
+test/test_cd_lost_wakeup: test/test_cd_lost_wakeup.c test/test_framework.h
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_cd_lost_wakeup.c -ldl
+
+test/test_audio_dac: test/test_audio_dac.c test/test_framework.h
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_audio_dac.c -ldl -lm
+
+test/test_blitter: test/test_blitter.c test/test_framework.h
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/test_blitter.c -ldl
+
+# Diagnostic CD harnesses: invoked manually with a CUE/CHD argument.
+test/dump_pc: test/dump_pc.c
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/dump_pc.c -ldl
+
+test/heap_search: test/heap_search.c
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 $(INCFLAGS) \
+		-o $@ test/heap_search.c -ldl
+
+# Aggregate target for the manual diagnostic tools.
+.PHONY: tools
+tools: test/dump_pc test/heap_search test/test_cd_boot tools/jagcd/jagcd-chd-check
+endif
+
+.PHONY: clean test lint coverage benchmark acid dsp-diag frame-timing cue2cdi \
+        runahead-determinism jaguar-demos jaguar-demos-fetch jaguar-demos-build \
+        jaguar-toolchain-fetch jaguar-toolchain-build \
+        roms-manifest roms-publish roms-fetch roms-verify \
+        jaguar-demos-smoke jaguar-demos-full jaguar-demos-baseline
+endif
+
+# Standalone libchdr binaries (no core dlopen / no TEST_EXPORTS). Live
+# outside the TEST_EXPORTS=1 branch so Windows MSYS2 CI can build them
+# without flushing the object tree. An explicit test/test_chd_unit rule
+# beats the TEST_EXPORTS!=1 catch-all.
+test/test_chd_unit: test/test_chd_unit.c $(SOURCES_LIBCHDR)
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-unused-variable -std=c99 \
+		$(INCFLAGS) $(LIBCHDR_CFLAGS) $(LIBCHDR_WARNFLAGS) \
+		-o $@ test/test_chd_unit.c $(SOURCES_LIBCHDR)
+
+tools/jagcd/jagcd-chd-check: tools/jagcd/jagcd-chd-check.c $(SOURCES_LIBCHDR)
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) $(LIBCHDR_CFLAGS) \
+		-o $@ tools/jagcd/jagcd-chd-check.c $(SOURCES_LIBCHDR)
+
+lint:
+	@scripts/c89-lint.sh
+	@# Hand-maintained source lists that repeat Makefile.common and rot
+	@# invisibly.  Run locally so drift fails BEFORE a push, not after a
+	@# Windows-only CI job fails on a missing header (issue #679).
+	@sh scripts/check-package-sources.sh
+	@sh scripts/check-msvc-sources.sh
+
+# `make coverage` -- builds with gcov instrumentation, runs the full
+# test suite, and produces a Cobertura XML report at coverage.xml plus
+# a textual summary.  See gcovr.cfg for path filters.
+coverage:
+	$(MAKE) clean
+	$(MAKE) COVERAGE=1 TEST_EXPORTS=1 -j$(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+	@# VJ_INSTRUMENTED_BUILD: the core is built -O0 + --coverage here and
+	@# runs below realtime, so wall-clock assertions must skip rather than
+	@# report a false failure.  It has to be an env var: the test binaries
+	@# compile with $(INCFLAGS) only, so a -D on $(FLAGS) never reaches them.
+	VJ_INSTRUMENTED_BUILD=1 $(MAKE) COVERAGE=1 TEST_EXPORTS=1 test
+	gcovr --config gcovr.cfg --xml-pretty -o coverage.xml --txt --print-summary
+
+# `make benchmark` -- headless wall-clock perf measurement on a fixed
+# ROM.  Boots the core via dlopen, runs $(BENCH_FRAMES) frames after
+# $(BENCH_WARMUP) warmup, prints FPS / ms-per-frame.  Use during
+# perf-tuning code changes; commit-by-commit deltas are the signal.
+#
+# Override on the command line:
+#   make benchmark BENCH_ROM=test/roms/private/Atari\ Karts.jag
+#   make benchmark BENCH_FRAMES=3000 BENCH_WARMUP=120
+#   make benchmark BENCH_BLITTER=accurate    # default: fast
+#
+# ROM/window choice (issue #533).  Profiled with `test/tools/ir_ab.sh
+# --profile`, which reports where retired instructions actually go:
+#
+#   workload             GPU interp   DSP interp   blitter   68K
+#   jagniccc @ 90              0.0%         0.0%      0.0%   ~38%   <- BIOS boot
+#   jagniccc @ 300            38.6%        22.3%      7.1%   ~5.9%
+#   jagniccc @ 600            40.2%        23.7%     10.3%   ~2%
+#   yarc     @ 90             71.2%        0.08%     17.5%   ~0%
+#
+# yarc.j64 was the default and is a poor one: its GPU time is 73.3% `jr`
+# (a spin loop) and its DSP share is ~0.08%, so a DSP or blitter change
+# measures as no effect on it.  It is an *amplifier* for GPU-loop work --
+# the #532 hoist scored -4.33% on yarc vs -3.77% on jagniccc, same change.
+# Keep it for making a GPU-loop effect visible; do not use it to size one.
+#
+# jagniccc.j64 (the NICCC 2000 port -- a GPU program rasterising 75,340
+# precalculated polygons while the 68K sits in `stop #$2000`) is the only
+# public ROM that exercises GPU, DSP, blitter and 68K in real proportion.
+#
+# WARMUP IS LOAD-BEARING HERE, not a rounding knob: jagniccc executes
+# ZERO GPU-interpreter instructions at 90 frames because it is still in
+# BIOS boot.  Warming up only 60 frames would put most of the measured
+# window in boot code and quietly report the wrong thing.  300 clears it.
+# If you shorten BENCH_WARMUP, re-run `ir_ab.sh --profile` and confirm the
+# mix survives.
+#
+# Historical note: numbers recorded before this change (e.g. issue #515's
+# -O2/-O3 figures) were taken on yarc @ 600/60 and are NOT comparable to
+# the new default.  `make benchmark` is a same-host commit-to-commit tool
+# either way -- never compare across machines.
+BENCH_ROM     ?= test/roms/jagniccc.j64
+BENCH_FRAMES  ?= 900
+BENCH_WARMUP  ?= 300
+BENCH_BLITTER ?= fast
+# BENCH_PROFILE=1 enables src/core/perf_counters.h instrumentation and
+# wide-export ABI so test_benchmark can dlsym `perf_counters_dump`.
+ifeq ($(BENCH_PROFILE),1)
+BENCH_TEST_EXPORTS := TEST_EXPORTS=1
+else
+BENCH_TEST_EXPORTS :=
+endif
+benchmark:
+	@# Re-invoke make so BENCH_PROFILE / TEST_EXPORTS take effect on the .so/.dylib.
+	$(MAKE) $(BENCH_TEST_EXPORTS) BENCH_PROFILE=$(BENCH_PROFILE) -j$(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+	@# Build the harness inline; it dlopens the core, so it only needs the retro_* ABI
+	@# (plus the optional perf_counters_dump symbol when BENCH_PROFILE=1).
+	@# -ldl is Linux-specific; macOS/BSD provide dl* in libSystem/libc.
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o test/tools/test_benchmark test/tools/test_benchmark.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl)
+	./test/tools/test_benchmark ./$(TARGET) "$(BENCH_ROM)" $(BENCH_FRAMES) \
+		--warmup $(BENCH_WARMUP) --blitter $(BENCH_BLITTER) \
+		$(if $(BENCH_STATE),--load-state "$(BENCH_STATE)")
+
+# `make acid` -- builds the core and runs the synthetic acid-test ROMs
+# (see test/acid/README.md).  Requires the vasm 68K assembler on $PATH;
+# if absent, the assemble step is skipped and only the runner harness
+# is built (so CI can still validate the harness compiles).
+#
+# Forces a BENCH_PROFILE=1 + TEST_EXPORTS=1 build of the core so the
+# acid runner can dlsym `perf_counters_find` and report a per-test
+# delta (halflines, vblank IRQs, blits, inner-loop iters, ...).
+acid:
+	$(MAKE) BENCH_PROFILE=1 TEST_EXPORTS=1 -j$(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+	$(MAKE) -C test/acid test CORE=$(abspath $(TARGET))
+
+# `make microbench` -- run the purpose-built microbenchmark ROMs (#536).
+# Builds the core with the wide test ABI (the tools read jaguarMainRAM),
+# builds every test_microbench_* tool, and runs each against its committed
+# .j64.  The ROMs are committed, so this needs no assembler; regenerate
+# them with test/microbench/build.sh only after editing a .s source.
+#
+# Each run prints a MICROBENCH line whose done_frame is the completion
+# frame -- the number these ROMs exist to produce.
+MICROBENCH_TOOLS := test/tools/test_microbench_68k \
+                     test/tools/test_microbench_gpu_arith \
+                     test/tools/test_microbench_gpu_branch \
+                     test/tools/test_microbench_dsp \
+                     test/tools/test_microbench_blit
+MICROBENCH_ROMS  := test/microbench/bench68k.j64 \
+                     test/microbench/benchgpu_arith.j64 \
+                     test/microbench/benchgpu_branch.j64 \
+                     test/microbench/benchdsp.j64 \
+                     test/microbench/benchblit.j64
+
+.PHONY: microbench
+microbench: export VJ_EXPECT_BUILD := $(shell ./scripts/build-id.sh)
+microbench:
+	$(MAKE) TEST_EXPORTS=1 -j$(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+	$(MAKE) TEST_EXPORTS=1 $(MICROBENCH_TOOLS)
+	@set -e; \
+	tools="$(MICROBENCH_TOOLS)"; roms="$(MICROBENCH_ROMS)"; \
+	set -- $$roms; \
+	for t in $$tools; do \
+		rom="$$1"; shift; \
+		echo "==> $$t $$rom"; \
+		./$$t ./$(TARGET) "$$rom"; \
+	done
+
+# `make dsp-diag` -- DSP audio diagnostic.  Builds core with TEST_EXPORTS=1,
+# compiles the harness + DSP probe, then runs the diagnostic against a ROM.
+#
+# Usage:
+#   make dsp-diag DSP_DIAG_ROM="test/roms/private/Wolfenstein 3D (1994).jag"
+#   make dsp-diag DSP_DIAG_ROM=path/to/rom.jag DSP_DIAG_FLAGS="--bios --frames 600"
+DSP_DIAG_ROM   ?= test/roms/private/Wolfenstein 3D (1994).jag
+DSP_DIAG_FLAGS ?= --dump-on-escape
+dsp-diag:
+	$(MAKE) TEST_EXPORTS=1 -j$(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o test/tools/test_dsp_audio_diag \
+		test/tools/test_dsp_audio_diag.c \
+		test/harness/harness.c test/harness/dsp_probe.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+	./test/tools/test_dsp_audio_diag ./$(TARGET) "$(DSP_DIAG_ROM)" $(DSP_DIAG_FLAGS)
+
+# `make frame-timing` -- Per-frame timing diagnostic.  Builds core with
+# BENCH_PROFILE=1 + TEST_EXPORTS=1, compiles the timing probe + harness,
+# then runs the diagnostic against a ROM.  Reports per-frame halfline counts,
+# M68K/RISC cycles, VBlank IRQs, wall-clock time, and speed ratio.
+#
+# Usage:
+#   make frame-timing FRAME_TIMING_ROM=test/roms/yarc.j64
+#   make frame-timing FRAME_TIMING_ROM="path/to/Doom.jag" FRAME_TIMING_FLAGS="--frames 1200 --csv"
+#   make frame-timing FRAME_TIMING_ROM="path/to/rom.jag" FRAME_TIMING_FLAGS="--pal --bios"
+FRAME_TIMING_ROM   ?= test/roms/yarc.j64
+FRAME_TIMING_FLAGS ?=
+frame-timing:
+	$(MAKE) BENCH_PROFILE=1 TEST_EXPORTS=1 -j$(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o test/tools/test_frame_timing \
+		test/tools/test_frame_timing.c \
+		test/harness/harness.c test/harness/timing_probe.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+	./test/tools/test_frame_timing ./$(TARGET) "$(FRAME_TIMING_ROM)" $(FRAME_TIMING_FLAGS)
+
+# `make runahead-determinism` -- Save-state determinism check.  Saves a state,
+# replays the same frames after retro_unserialize, and asserts the video and
+# audio come back identical.  This is the evidence behind
+# `savestate_features = 3` in dist/info/, and behind reporting zero
+# serialization quirks: run-ahead, rewind and netplay all assume a state is a
+# complete snapshot.
+#
+# NOT part of `make test`: one assertion (audio_replay_identical) is a known
+# failure — a single frame of ~0.05% RMS drift on the first rollback.  See the
+# tool header for the full measurement and what has already been ruled out.
+#
+# Usage:
+#   make runahead-determinism RUNAHEAD_ROM="path/to/game.j64"
+#   make runahead-determinism RUNAHEAD_ROM="path/to/game.j64" RUNAHEAD_FLAGS="--warmup 600 --frames 300"
+RUNAHEAD_ROM   ?= test/roms/yarc.j64
+RUNAHEAD_FLAGS ?=
+runahead-determinism:
+	$(MAKE) TEST_EXPORTS=1 -j$(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o test/tools/test_runahead_determinism \
+		test/tools/test_runahead_determinism.c \
+		test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl -lrt) -lm
+	./test/tools/test_runahead_determinism ./$(TARGET) "$(RUNAHEAD_ROM)" $(RUNAHEAD_FLAGS)
+
+# Automated visual + audio verification for CD titles: frame-motion timeline,
+# audio RMS, periodic screenshots (PPM).  See the tool header for usage.
+#   make cd-visual CD_VISUAL_DISC="test/roms/private/Title/Title.cue" \
+#        CD_VISUAL_FLAGS="--bios --frames 3000 --outdir /tmp/cdshots"
+CD_VISUAL_DISC  ?=
+CD_VISUAL_FLAGS ?= --bios --frames 3000
+cd-visual:
+	$(MAKE) TEST_EXPORTS=1 -j$(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+	$(CC) -O2 -Wall -std=c99 $(INCFLAGS) \
+		-o test/tools/cd_visual_verify \
+		test/tools/cd_visual_verify.c test/harness/harness.c \
+		$(if $(filter Linux,$(shell uname -s)),-ldl) -lm
+	@if [ -n "$(CD_VISUAL_DISC)" ]; then \
+		VJ_EXPECT_BUILD=$$(./scripts/build-id.sh) \
+		./test/tools/cd_visual_verify ./$(TARGET) "$(CD_VISUAL_DISC)" $(CD_VISUAL_FLAGS); \
+	else \
+		echo "built test/tools/cd_visual_verify -- pass CD_VISUAL_DISC=<image> to run"; \
+	fi
+
+# `make cue2cdi` -- build the standalone CUE/BIN -> DiscJuggler CDI
+# converter (host-side tool, libc only; no core, no libretro deps).
+# Not part of the default build or `make test`; build it on demand.
+#
+# Usage:
+#   make cue2cdi
+#   ./test/tools/cue2cdi game.cue --verify
+#   ./test/tools/cue2cdi --batch --verify path/to/dumps/
+.PHONY: cue2cdi
+cue2cdi:
+	$(CC) -O2 -Wall -std=c99 -o test/tools/cue2cdi test/tools/cue2cdi.c
+
+# ---------------------------------------------------------------------------
+# Tier-1 private ROM store (scripts/rom-store.sh).
+#
+# The ~22 MB subset of the private corpus that this suite actually asks for
+# -- every entry in test/roms/tier1.patterns is copied from a real find-rom.sh
+# call site below, so the list cannot drift from the tests.  CI fetches it
+# from a private S3-compatible bucket and points ROMS_PRIVATE_ROOT at the
+# result; developers with their own corpus set ROMS_PRIVATE_ROOT and never
+# fetch.  See docs/test-rom-store.md.
+#
+# roms-fetch exits 77 when no store is configured.  That is a SKIP, and it is
+# deliberately NOT 0: a silent "fetched nothing" is how a suite ends up green
+# while testing none of the titles that catch regressions.
+.PHONY: roms-manifest roms-publish roms-fetch roms-verify
+roms-manifest:
+	bash scripts/rom-store.sh manifest
+
+roms-publish:
+	bash scripts/rom-store.sh publish
+
+roms-fetch:
+	bash scripts/rom-store.sh fetch
+
+roms-verify:
+	bash scripts/rom-store.sh verify
+
+# JaguarDemos corpus (https://codeberg.org/42Bastian/JaguarDemos)
+#
+# On-demand clone + cart_boot_probe sweep.  NOT part of `make test`.
+# Smoke (curated list) is what PR CI runs; full is for release PRs / tags.
+# See test/jaguar-demos/README.md.  The clone is gitignored under
+# test/vendor/JaguarDemos — not a submodule, so a normal checkout stays
+# small and CI pins the SHA in test/jaguar-demos/PIN.
+# ---------------------------------------------------------------------------
+.PHONY: jaguar-demos jaguar-demos-fetch jaguar-demos-build \
+        jaguar-demos-smoke jaguar-demos-full jaguar-demos-baseline
+jaguar-demos-fetch:
+	bash test/jaguar-demos/run.sh fetch
+
+jaguar-demos-build: jaguar-demos-fetch
+	bash test/jaguar-demos/run.sh build
+
+.PHONY: jaguar-toolchain-fetch jaguar-toolchain-build
+jaguar-toolchain-fetch:
+	bash tools/jaguar-toolchain/setup.sh fetch
+
+jaguar-toolchain-build: jaguar-toolchain-fetch
+	bash tools/jaguar-toolchain/setup.sh build
+
+jaguar-demos-smoke jaguar-demos: export VJ_EXPECT_BUILD := $(shell ./scripts/build-id.sh)
+jaguar-demos-smoke jaguar-demos:
+	$(MAKE) TEST_EXPORTS=1 -j$(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+	bash test/jaguar-demos/run.sh smoke ./$(TARGET)
+
+jaguar-demos-full: export VJ_EXPECT_BUILD := $(shell ./scripts/build-id.sh)
+jaguar-demos-full:
+	$(MAKE) TEST_EXPORTS=1 -j$(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+	bash test/jaguar-demos/run.sh build
+	bash test/jaguar-demos/run.sh full ./$(TARGET)
+
+jaguar-demos-baseline: export VJ_EXPECT_BUILD := $(shell ./scripts/build-id.sh)
+jaguar-demos-baseline:
+	$(MAKE) TEST_EXPORTS=1 -j$(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+	bash test/jaguar-demos/run.sh build
+	bash test/jaguar-demos/run.sh baseline ./$(TARGET)
+
+print-%:
+	@echo '$*=$($*)'
+
+# TOM hardware readback regression (#1044, #1045).
+test/test_tom_readback: test/test_tom_readback.c test/test_framework.h
+	$(CC) -O2 -Wall -Wno-unused-function -std=c99 $(INCFLAGS) -o $@ $< -ldl
+
+# MMULT matrix-address counter regression (#1043).
+test/test_mmult: test/test_mmult.c test/test_framework.h
+	$(CC) -O2 -Wall -Wno-unused-function -std=c99 $(INCFLAGS) -o $@ $< -ldl

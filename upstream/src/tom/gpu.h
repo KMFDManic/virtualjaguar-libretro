@@ -1,0 +1,97 @@
+//
+// GPU.H: Header file
+//
+
+#ifndef __GPU_H__
+#define __GPU_H__
+
+#include "vjag_memory.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define GPU_CONTROL_RAM_BASE    0x00F02100
+#define GPU_WORK_RAM_BASE		0x00F03000
+
+void GPUInit(void);
+void GPUDone(void);
+void GPUReset(void);
+void GPUClockScaleReset(void);
+void GPUExec(int32_t);
+/* Slice bookkeeping for the 68K->GPU-local-RAM sync; see the comment on
+ * gpuSliceBudget in gpu.c.  GPUBeginSlice() declares the RISC cycles the
+ * scheduler will hand the GPU for this slice, GPUSliceRemaining() reports
+ * what is left after any mid-slice syncs, and GPUSyncToM68K() advances the
+ * GPU to the 68000's position when the two processors communicate. */
+void GPUBeginSlice(uint32_t riscCycles);
+int32_t GPUSliceRemaining(void);
+void GPUSyncToM68K(void);
+void GPUUpdateRegisterBanks(void);
+/* Add wall-time system clocks to the current GPU instruction's bus
+ * stall (blitter bus-time model). */
+void GPUChargeBusStall(uint32_t sysclks);
+/* Zero the pipeline/gateway timing model's transient state (option
+ * toggle, reset, savestate load). */
+void GPUPipeTimingReset(void);
+void GPUHandleIRQs(void);
+void GPUSetIRQLine(int irqline, int state);
+
+uint8_t GPUReadByte(uint32_t offset, uint32_t who);
+uint16_t GPUReadWord(uint32_t offset, uint32_t who);
+uint32_t GPUReadLong(uint32_t offset, uint32_t who);
+void GPUWriteByte(uint32_t offset, uint8_t data, uint32_t who);
+void GPUWriteWord(uint32_t offset, uint16_t data, uint32_t who);
+void GPUWriteLong(uint32_t offset, uint32_t data, uint32_t who);
+
+uint32_t GPUGetPC(void);
+/* GDB stub accessors (issue #652): the active register bank, PC and
+ * flags register, read and write. See src/tom/gpu.c for why the writes
+ * are raw pokes rather than routed through the MMIO write path. */
+uint32_t GPUGetReg(int n);
+void GPUSetReg(int n, uint32_t v);
+void GPUSetPC(uint32_t pc);
+uint32_t GPUGetFlags(void);
+void GPUSetFlags(uint32_t v);
+uint32_t GPUGetControl(void);
+void GPUReleaseTimeslice(void);
+void GPUCPUINTCallback(void);
+void GPUResetStats(void);
+uint32_t GPUReadPC(void);
+int GPUIsRunning(void);
+/* True when the RISC core cannot capture interrupt asserts: stopped
+ * (GPUGO clear) or parked in the SINGLE_STEP coprocessor barrier.
+ * Mirrors the drop condition in GPUSetIRQLine/GPUHandleIRQs so edge
+ * trackers (BUTCH) don't mark a dropped assert as consumed. */
+int GPUCanCaptureIRQ(void);
+int GPUOPInterruptEnabled(void);
+void GPUDumpState(const char *tag);
+
+// GPU interrupt numbers (from $F00100, bits 4-8)
+
+enum { GPUIRQ_CPU = 0, GPUIRQ_DSP, GPUIRQ_TIMER, GPUIRQ_OBJECT, GPUIRQ_BLITTER };
+
+// Exported vars
+
+extern uint32_t gpu_reg_bank_0[], gpu_reg_bank_1[];
+
+/* Diagnostic IRQ counters (incremented in GPUSetIRQLine on ASSERT_LINE,
+ * reset in GPUReset). Pure diagnostics — no behavioural side effects.
+ * gpu_irq0_count = CD ISR (BUTCH external IRQ via EXT1)
+ * gpu_irq3_count = OP IRQ (sanity counter for object-processor activity) */
+extern uint32_t gpu_irq0_count;
+extern uint32_t gpu_irq3_count;
+
+/* Idle-loop fast-forward diagnostics (issue #569, GPU port).  Counted
+ * only on the cold probe path; read by test/tools, never by the
+ * emulator itself. */
+extern uint32_t gpu_idle_skip_fires;
+extern uint32_t gpu_idle_skip_rejects;
+extern uint32_t gpu_idle_skip_iters;
+extern uint32_t gpu_idle_skip_opcodes;
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif	// __GPU_H__

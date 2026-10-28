@@ -1,0 +1,88 @@
+name: Bump Version & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      dry_run:
+        description: 'Dry run (no commit/tag/push)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+
+    - name: Parse current version
+      id: current
+      run: |
+        # Source of truth: CORE_BASE_VERSION line in Makefile.
+        VER=$(grep -oP '^CORE_BASE_VERSION\s*:?=\s*v\K[0-9]+\.[0-9]+\.[0-9]+' Makefile)
+        echo "version=${VER}" >> "$GITHUB_OUTPUT"
+        echo "Current version: v${VER}"
+
+    - name: Compute next version
+      id: next
+      run: |
+        IFS='.' read -r MAJOR MINOR PATCH <<< "${{ steps.current.outputs.version }}"
+        case "${{ inputs.bump }}" in
+          major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+          minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+          patch) PATCH=$((PATCH + 1)) ;;
+        esac
+        NEXT="${MAJOR}.${MINOR}.${PATCH}"
+        echo "version=${NEXT}" >> "$GITHUB_OUTPUT"
+        echo "Next version: v${NEXT}"
+
+    - name: Update Makefile
+      run: |
+        sed -i 's/^CORE_BASE_VERSION := v${{ steps.current.outputs.version }}$/CORE_BASE_VERSION := v${{ steps.next.outputs.version }}/' Makefile
+        grep '^CORE_BASE_VERSION' Makefile
+
+    # src/core/version_fallback.h carries a deliberate copy of the version
+    # for build systems that cannot run scripts/gen-version-h.sh (SwiftPM).
+    # Nothing rewrites it at build time -- on purpose, see the header -- so
+    # the bump has to touch it here.  c-cpp.yml fails the build if the two
+    # ever diverge.
+    - name: Update version_fallback.h
+      run: |
+        sed -i 's/^#define CORE_BASE_VERSION "v${{ steps.current.outputs.version }}"$/#define CORE_BASE_VERSION "v${{ steps.next.outputs.version }}"/' src/core/version_fallback.h
+        grep '^#define CORE_BASE_VERSION' src/core/version_fallback.h
+
+    - name: Commit, tag, and push
+      if: ${{ !inputs.dry_run }}
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add Makefile src/core/version_fallback.h
+        git commit -m "Bump version to v${{ steps.next.outputs.version }}"
+        git tag "v${{ steps.next.outputs.version }}"
+        git push origin HEAD --tags
+
+    - name: Summary
+      run: |
+        echo "### Version Bump" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **From:** v${{ steps.current.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **To:** v${{ steps.next.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Bump:** ${{ inputs.bump }}" >> "$GITHUB_STEP_SUMMARY"
+        echo "- **Dry run:** ${{ inputs.dry_run }}" >> "$GITHUB_STEP_SUMMARY"
+        if [ "${{ inputs.dry_run }}" = "false" ]; then
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tag \`v${{ steps.next.outputs.version }}\` pushed — Release workflow will create the GitHub Release automatically." >> "$GITHUB_STEP_SUMMARY"
+        fi

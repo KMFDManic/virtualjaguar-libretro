@@ -1,0 +1,136 @@
+# Wide symbol export list for Mach-O test builds (TEST_EXPORTS=1).
+#
+# Mirrors link-test.T: exposes the internal symbols our headless test
+# harnesses dlsym into.  Used only when TEST_EXPORTS=1 (set by the
+# `test` target); production .dylib uses exports.list (retro_* only).
+#
+# If you add a new symbol here, that's an extension to the test ABI
+# only -- it does NOT change the production-shipped .dylib.
+#
+# Symbol names are prefixed with `_` per the Mach-O ABI.
+_retro_*
+_DSP*
+_dsp_*
+_m68k_*
+_Jaguar*
+_jaguar*
+_Halfline*
+_jaguarMainRAM
+_m68kClockScalePct
+_riscClockScalePct
+_jaguarMainROM
+_jagMemSpace
+_busArbiter
+_riscClockScalePct
+_gpuPCSample
+_m68kPCSample
+_m68kPCSampleIdx
+_pcQueue
+_pcQPtr
+_startM68KTracing
+_a6Queue
+_d0Queue
+_GPU*
+_gpu_*
+_JERRY*
+_UART*
+_JLink*
+_VM*
+_TOM*
+_OP*
+_tomRam8
+_regs
+_ltxd
+_rtxd
+_lrxd
+_rrxd
+_sclk
+_smode
+_SetSSIWordsXmittedFromButch
+_lowerField
+_vjs
+_videoBuffer
+_game_width
+_game_height
+_perf_counters_dump
+_perf_counters_reset
+_perf_counters_register
+_perf_counters_find
+_CDROM*
+_CDIntf*
+_CDTrace*
+_CrashDetect*
+_BUTCH*
+_GetRamPtr
+_bootConfig
+_cd_boot_strategy_*
+_jaguar_cd_*
+_ResolveBootConfig
+_BlitterCompare*
+_BlitterIsHung
+_BlitterNeverEndsApprox
+_BlitterReadLong
+_BlitterWriteLong
+_DAC*
+_Joystick*
+_joypad0Buttons
+_joypad1Buttons
+_InputDev*
+_Quad*
+_MTState*
+_mtMem
+_NVMBios*
+_NVM_*
+_JGD*
+_jgd*
+_shadowHiresResolveHits
+_shadowHiresResolveMissValue
+_shadowHiresResolveMissEpoch
+_shadowHiresResolveMissNoPage
+_shadowHiresN
+_shadowHiresActive
+_shadowFBActive
+_blitMemo*
+_TitleDB*
+# Texture dump/replacement (#369) probes + the shadow-framebuffer
+# presentation functions the replacement tests drive directly.
+_TexDump*
+_TexReplace*
+_texDumpEnabled
+_texReplaceEnabled
+_ShadowFB*
+_shadowLineRGB
+_shadowLineTag
+# RGB16-direct pack presentation (#528): the gate drives the seam both
+# RGB16 renderers use.  _TomLinePackRGB is NOT covered by _TOM* -- the
+# prefix differs in case.
+_shadowFBReplActive
+_TomLinePackRGB
+# Nx surface probes: the tier-3 (>1x pack art) gates drive the OP's own
+# resolve function and read the Nx line planes directly.
+_ShadowHires*
+_shadowHiresLineSub
+_shadowHiresLineTag
+_shadowHiresLineRepl
+_shadowHiresReplActive
+# _TitleHook* is NOT covered by _TitleDB* -- the applier lives in its own
+# translation unit and its own name prefix.
+_TitleHook*
+_vjtrace_*
+# _VJPerf* / _vjPerfActive: the libretro perf-interface plumbing (#510).
+# test/tools/perf_iface_witness.c dlsyms these to prove the counters really
+# register and that the probe regions stay balanced -- neither has any other
+# exercised call site, so nothing else would catch a regression.
+_VJPerf*
+_vjPerfActive
+# App debug interface (src/debug/vjdebug.c): test/test_debug_iface.c calls the accessor
+# directly as well as through the private frontend channel.
+_VJDebug*
+_vjDebugFrame
+
+_InitializeEventList
+_SubtractEventTimes
+_GetTimeToNextEvent
+_HandleNextEvent
+_EventStateSave
+_EventStateLoad

@@ -1,0 +1,102 @@
+/* jlink.h — byte-transport seam for the JERRY UART (JagLink/CatBox link).
+   Phase 1 backends: disabled, loopback.  TCP and libretro-netpacket
+   backends arrive in later phases behind this same interface. */
+#ifndef __JLINK_H__
+#define __JLINK_H__
+
+#include <stdint.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+enum
+{
+   JLINK_MODE_DISABLED   = 0,
+   JLINK_MODE_LOOPBACK   = 1,
+   JLINK_MODE_TCP_SERVER = 2,
+   JLINK_MODE_TCP_CLIENT = 3,
+   JLINK_MODE_NETPACKET  = 4   /* frontend netplay session (env 78) */
+};
+
+/* What is plugged into the DSP port on the far side of the UART.
+ * JagLink/CatBox are a bare wire (bytes pass through untouched); the
+ * Voice Modem (voicemodem.c) is a command/response device in front of
+ * the same transport. */
+enum
+{
+   JLINK_DEVICE_JAGLINK    = 0,
+   JLINK_DEVICE_VOICEMODEM = 1
+};
+
+void JLinkSetDevice(int device);
+int  JLinkDevice(void);
+
+/* Raw transport send, bypassing the device layer (used by the voice
+ * modem to reach its peer; identical to JLinkSendByte for JagLink). */
+void JLinkWireSendByte(uint8_t b);
+
+/* UART TX burst finished (shift register drained, hold empty): flush
+ * batched transport bytes; the voice modem also emits its end-of-packet
+ * marker here. */
+void JLinkTxBurstEnd(void);
+
+/* Push transport-received bytes into the RX ring (netpacket backend). */
+void JLinkNPDeliver(const uint8_t *buf, size_t len);
+
+/* TCP endpoint config; call before JLinkOpen for the TCP modes.
+   host is ignored in server mode (listens on INADDR_ANY). */
+void JLinkSetTCPEndpoint(const char *host, int port);
+const char *JLinkGetTCPHost(void);
+void JLinkSetWaitEnabled(int enabled);
+void JLinkFrameTick(void);
+void JLinkFrameEnd(double fieldHz);
+void JLinkAwaitReply(void);
+/* Same wait for a byte the partner sends unprompted; call when the game is
+   spinning on the UART status with nothing to send (see jlink.c). */
+void JLinkAwaitIdle(void);
+/* Once per frame: returns 1 and a one-line link health summary in buf about
+   every 5 s while a link carries traffic (see jlink.c). */
+int JLinkStatsPoll(char *buf, size_t len);
+/* Numbers behind the line JLinkStatsPoll() last produced (all four may be
+   NULL): link exchanges per second, mean hop time in ms x100, hops that
+   slipped, waits that timed out.  Zero before the first window. */
+void JLinkStatsLast(unsigned *hopsPerSec, unsigned *hopMsX100,
+                    unsigned *slipped, unsigned *timeouts);
+
+int  JLinkOpen(int mode);
+void JLinkClose(void);
+int  JLinkMode(void);
+int  JLinkConnected(void);
+void JLinkSendByte(uint8_t b);
+int  JLinkRecvByte(uint8_t *b);
+int  JLinkRxPending(void);
+/* Per-frame service: progress TCP connect/accept, drain socket into the
+   RX ring (bounded by ring space), flush pending TX.  No-op for
+   loopback/disabled. */
+void JLinkPoll(void);
+/* Mid-frame pump for latency-sensitive polling paths: fetch any bytes
+   already available from the transport RIGHT NOW (netpacket: ask the
+   frontend to deliver pending packets; TCP: drain the socket).  Called
+   by the UART when a game polls for link data; callers rate-limit. */
+void JLinkPump(void);
+/* Lifetime traffic counters (diagnostics; reset by JLinkClose). */
+uint32_t JLinkTxTotal(void);
+uint32_t JLinkRxTotal(void);
+
+/* Wall-clock milliseconds, used to drive jlink_discover.c's beacon
+   cadence and peer expiry from JLinkFrameTick. */
+uint32_t JLinkNowMs(void);
+/* Has the LAN discovery peer set changed since the last call?  Reads
+   and clears the flag set by JLinkFrameTick's discovery poll. */
+int JLinkDiscConsumeChanged(void);
+
+size_t JLinkStateSave(uint8_t *buf);
+size_t JLinkStateLoad(const uint8_t *buf);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

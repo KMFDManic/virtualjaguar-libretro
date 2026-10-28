@@ -1,0 +1,20 @@
+name: Pull Request on Branch Push
+on:
+  push:
+    branches-ignore:
+      - staging
+      - launchpad
+      - production
+jobs:
+  auto-pull-request:
+    name: PullRequestAction
+    runs-on: ${{ contains(fromJSON(vars.VJ_TEMP_RUNNERS || '{"refs":[]}').refs, github.ref) && fromJSON(vars.VJ_TEMP_RUNNERS)['ubuntu-latest'] || 'ubuntu-latest' }}
+    steps:
+      - name: pull-request-action
+        uses: vsoch/pull-request-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH_PREFIX: 'feature/'
+          # GitFlow: feature/* branches integrate via develop.
+          PULL_REQUEST_BRANCH: 'develop'
+          PULL_REQUEST_DRAFT: true

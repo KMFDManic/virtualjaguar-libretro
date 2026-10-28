@@ -1,0 +1,1162 @@
+name: Release
+
+# Three publication paths share one build matrix:
+#   push tag v*        -> the `release` job: a real, permanent GitHub release
+#   push to develop    -> the `nightly` job, tag `nightly`
+#   push to release/** -> the same job, tag `prerelease` (issue #507)
+# The build/vita-build/switch-build jobs below are trigger-agnostic; only the
+# final publishing job differs.  Neither rolling tag is named v-anything, so a
+# CI-pushed tag can never re-enter the release path.
+#
+# The release/** lane exists because a release branch was otherwise invisible
+# until it was tagged: the code most in need of 24-platform coverage got none,
+# and the libretro buildbot only reacted after the tag, when a break becomes a
+# hotfix rather than a fix.
+#
+# workflow_dispatch exists ONLY to re-publish a rolling tag, so it must be run
+# with the branch set to `develop` or a `release/*` branch.  GitHub defaults
+# the branch picker to the repo default (`master` here), and every publishing
+# job is ref-gated, so a dispatch left on the default would build all 24
+# targets and publish nothing.
+# The `guard` job below fails that case immediately instead of burning the
+# matrix.  To test-build an arbitrary branch, use c-cpp.yml — it has its own
+# workflow_dispatch and runs on PRs.
+on:
+  push:
+    tags: ['v*']
+    branches: [develop, 'release/**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Tag pushes always run to completion — a release build must never be
+# cancelled.  Develop pushes cancel superseded runs, because only the newest
+# commit's binaries matter for a rolling prerelease and an in-flight build of
+# an older tip is pure waste.  This deliberately differs from c-cpp.yml /
+# acid-test.yml, which let develop pushes finish so there is a green-or-red
+# record per commit: that record is their job, not this one's.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/heads/release/') }}
+
+jobs:
+  # ----------------------------------------------------------------
+  # Fail a pointless dispatch in seconds rather than after 24 builds.
+  # Only reachable via workflow_dispatch: push events always arrive on a
+  # ref one of the two publishing jobs accepts.
+  # ----------------------------------------------------------------
+  guard:
+    name: Check dispatch ref
+    runs-on: ${{ contains(fromJSON(vars.VJ_TEMP_RUNNERS || '{"refs":[]}').refs, github.ref) && fromJSON(vars.VJ_TEMP_RUNNERS)['ubuntu-latest'] || 'ubuntu-latest' }}
+    steps:
+      - name: Refuse a dispatch that would publish nothing
+        if: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/develop' && !startsWith(github.ref, 'refs/heads/release/') }}
+        run: |
+          # Built up in one variable because a ::error:: annotation has to be a
+          # single line to render as one.
+          # TARGETS = 22 build configs + vita-build + switch-build = 24
+          MSG="Run this workflow with the branch set to 'develop' or a 'release/*' branch."
+          MSG="$MSG The publishing jobs are ref-gated (tags v* -> release,"
+          MSG="$MSG develop -> nightly, release/* -> prerelease), so a dispatch"
+          MSG="$MSG from '${GITHUB_REF_NAME}' would build all 24 targets and"
+          MSG="$MSG publish nothing."
+          MSG="$MSG To test-build a branch, use the C/C++ CI workflow instead."
+          echo "::error::$MSG"
+          exit 1
+
+  # ----------------------------------------------------------------
+  # Native + cross builds (Linux/macOS/Windows/iOS/tvOS/Android/WASM)
+  # Each job builds with RELEASE_DEBUG_INFO=1 so we keep -g on the
+  # optimized binary, then extracts split debug symbols and strips the
+  # shipped binary.
+  # ----------------------------------------------------------------
+  build:
+    needs: [guard]
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          # Linux
+          - platform: linux-x86_64
+            artifact: virtualjaguar_libretro.so
+            os: ubuntu-latest
+            cc: gcc
+            cxx: g++
+
+          - platform: linux-aarch64
+            artifact: virtualjaguar_libretro.so
+            os: ubuntu-24.04-arm
+            cc: gcc
+            cxx: g++
+
+          - platform: linux-i686
+            artifact: virtualjaguar_libretro.so
+            os: ubuntu-latest
+            cc: 'gcc -m32'
+            cxx: 'g++ -m32'
+            multilib: true
+
+          # Raspberry Pi -- per-SoC tuned (issue #560).
+          #
+          # Cross-compiled on x86_64: -mcpu names a core to generate code FOR,
+          # it does not require running on one, so no Pi hardware is needed to
+          # produce these. The per-SoC flags live in the Makefile's rpi*
+          # platform blocks -- do not duplicate them here.
+          #
+          # rpi0 is deliberately absent: it is the same BCM2835/ARM1176 part
+          # as rpi1 and resolves to identical flags, so the rpi1 artifact
+          # serves both. Every other row is a genuinely distinct target.
+          #
+          # 32- and 64-bit rows for the same chip are BOTH needed: they are
+          # different userlands (Raspberry Pi OS ships both), and the 32-bit
+          # ones additionally carry -mfpu/-mfloat-abi, which aarch64 gcc
+          # rejects outright.
+          - platform: linux-rpi1-armv6
+            artifact: virtualjaguar_libretro.so
+            os: ubuntu-latest
+            cc: arm-linux-gnueabihf-gcc
+            cxx: arm-linux-gnueabihf-g++
+            make_extra: platform=rpi1
+            cross_arm: armhf
+
+          - platform: linux-rpi2-cortex-a7
+            artifact: virtualjaguar_libretro.so
+            os: ubuntu-latest
+            cc: arm-linux-gnueabihf-gcc
+            cxx: arm-linux-gnueabihf-g++
+            make_extra: platform=rpi2
+            cross_arm: armhf
+
+          - platform: linux-rpi3-cortex-a53
+            artifact: virtualjaguar_libretro.so
+            os: ubuntu-latest
+            cc: arm-linux-gnueabihf-gcc
+            cxx: arm-linux-gnueabihf-g++
+            make_extra: platform=rpi3
+            cross_arm: armhf
+
+          - platform: linux-rpi3_64-cortex-a53
+            artifact: virtualjaguar_libretro.so
+            os: ubuntu-latest
+            cc: aarch64-linux-gnu-gcc
+            cxx: aarch64-linux-gnu-g++
+            make_extra: platform=rpi3_64
+            cross_arm: arm64
+
+          - platform: linux-rpi4-cortex-a72
+            artifact: virtualjaguar_libretro.so
+            os: ubuntu-latest
+            cc: arm-linux-gnueabihf-gcc
+            cxx: arm-linux-gnueabihf-g++
+            make_extra: platform=rpi4
+            cross_arm: armhf
+
+          - platform: linux-rpi4_64-cortex-a72
+            artifact: virtualjaguar_libretro.so
+            os: ubuntu-latest
+            cc: aarch64-linux-gnu-gcc
+            cxx: aarch64-linux-gnu-g++
+            make_extra: platform=rpi4_64
+            cross_arm: arm64
+
+          - platform: linux-rpi5-cortex-a76
+            artifact: virtualjaguar_libretro.so
+            os: ubuntu-latest
+            cc: arm-linux-gnueabihf-gcc
+            cxx: arm-linux-gnueabihf-g++
+            make_extra: platform=rpi5
+            cross_arm: armhf
+
+          - platform: linux-rpi5_64-cortex-a76
+            artifact: virtualjaguar_libretro.so
+            os: ubuntu-latest
+            cc: aarch64-linux-gnu-gcc
+            cxx: aarch64-linux-gnu-g++
+            make_extra: platform=rpi5_64
+            cross_arm: arm64
+
+          # macOS
+          - platform: macos-arm64
+            artifact: virtualjaguar_libretro.dylib
+            os: macos-latest
+            cc: clang
+            cxx: clang++
+
+          # Cross-compiled from the macos-latest (arm64) runner via
+          # `clang -arch x86_64`.  Avoids the increasingly scarce
+          # macos-13 (Intel) runner pool that left v2.2.0's release
+          # job queued for an hour.  BLITTER_SIMD=sse2 is required
+          # because the Makefile's auto-detect uses host arch.
+          - platform: macos-x86_64
+            artifact: virtualjaguar_libretro.dylib
+            os: macos-latest
+            cc: clang -arch x86_64
+            cxx: clang++ -arch x86_64
+            make_extra: 'BLITTER_SIMD=sse2'
+
+          # Windows
+          - platform: windows-x86_64
+            artifact: virtualjaguar_libretro.dll
+            os: windows-latest
+            cc: gcc
+            cxx: g++
+            shell: 'msys2 {0}'
+            msystem: 'MINGW64'
+            msys2_packages: 'mingw-w64-x86_64-gcc make'
+
+          - platform: windows-i686
+            artifact: virtualjaguar_libretro.dll
+            os: windows-latest
+            cc: gcc
+            cxx: g++
+            shell: 'msys2 {0}'
+            msystem: 'MINGW32'
+            msys2_packages: 'mingw-w64-i686-gcc make'
+
+          # Emscripten (WebAssembly)
+          - platform: emscripten-wasm
+            artifact: virtualjaguar_libretro_emscripten.bc
+            os: ubuntu-latest
+            emscripten: true
+
+          # Android NDK
+          - platform: android-arm64-v8a
+            artifact: libs/arm64-v8a/libretro.so
+            os: ubuntu-latest
+            android: true
+            android_abi: 'arm64-v8a'
+            android_simd: 'neon'
+
+          - platform: android-armeabi-v7a
+            artifact: libs/armeabi-v7a/libretro.so
+            os: ubuntu-latest
+            android: true
+            android_abi: 'armeabi-v7a'
+            android_simd: 'neon'
+
+          - platform: android-x86_64
+            artifact: libs/x86_64/libretro.so
+            os: ubuntu-latest
+            android: true
+            android_abi: 'x86_64'
+            android_simd: 'sse2'
+
+          - platform: android-x86
+            artifact: libs/x86/libretro.so
+            os: ubuntu-latest
+            android: true
+            android_abi: 'x86'
+            android_simd: 'sse2'
+
+          # iOS / tvOS
+          - platform: ios-arm64
+            artifact: virtualjaguar_libretro_ios.dylib
+            os: macos-latest
+            make_platform: 'ios-arm64'
+
+          - platform: tvos-arm64
+            artifact: virtualjaguar_libretro_tvos.dylib
+            os: macos-latest
+            make_platform: 'tvos-arm64'
+
+    name: build-${{ matrix.config.platform }}
+    runs-on: ${{ matrix.config.os }}
+
+    defaults:
+      run:
+        shell: ${{ matrix.config.shell || 'bash' }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install multilib
+        if: matrix.config.multilib
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib g++-multilib
+
+      # Cross toolchain for the Raspberry Pi rows. Also provides the matching
+      # objcopy: the host x86_64 objcopy in the packaging step below cannot
+      # read an ARM ELF (Ubuntu's binutils is single-target), so the strip /
+      # split-debug step needs the prefixed one.
+      - name: Install ARM cross toolchain
+        if: matrix.config.cross_arm
+        run: |
+          set -e
+          sudo apt-get update
+          if [ "${{ matrix.config.cross_arm }}" = armhf ]; then
+            sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+          else
+            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          fi
+
+      - name: Set up MSYS2
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.config.msystem || 'MINGW64' }}
+          update: false
+          install: ${{ matrix.config.msys2_packages || 'mingw-w64-x86_64-gcc make' }}
+
+      - name: Set up Emscripten
+        if: matrix.config.emscripten
+        uses: mymindstorm/setup-emsdk@v16
+
+      - name: Set up Android NDK
+        if: matrix.config.android
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26d
+
+      - name: Build
+        if: ${{ !matrix.config.emscripten && !matrix.config.android && !matrix.config.make_platform }}
+        env:
+          RELEASE_DEBUG_INFO: '1'
+          TEST_EXPORTS: '0'
+        run: make -j4 CC="${{ matrix.config.cc }}" CXX="${{ matrix.config.cxx }}" ${{ matrix.config.make_extra || '' }}
+
+      - name: Build (platform)
+        if: matrix.config.make_platform
+        env:
+          RELEASE_DEBUG_INFO: '1'
+          TEST_EXPORTS: '0'
+        run: make -j4 platform=${{ matrix.config.make_platform }}
+
+      - name: Build (Emscripten)
+        if: matrix.config.emscripten
+        env:
+          RELEASE_DEBUG_INFO: '1'
+          TEST_EXPORTS: '0'
+        run: emmake make -j4 platform=emscripten
+
+      - name: Build (Android NDK)
+        if: matrix.config.android
+        env:
+          RELEASE_DEBUG_INFO: '1'
+          TEST_EXPORTS: '0'
+        run: bash scripts/build-ndk-ci.sh "${{ steps.setup-ndk.outputs.ndk-path }}" "${{ matrix.config.android_abi }}" "${{ matrix.config.android_simd }}"
+
+      - name: Verify compile-only Mach-O production exports
+        if: ${{ matrix.config.platform == 'macos-x86_64' || matrix.config.platform == 'ios-arm64' || matrix.config.platform == 'tvos-arm64' }}
+        run: |
+          LEAKS=$(nm -gU "${{ matrix.config.artifact }}" | grep -v ' _retro_' || true)
+          if [ -n "$LEAKS" ]; then
+            echo "::error::Production dylib leaked non-retro_* symbols:"
+            echo "$LEAKS"
+            exit 1
+          fi
+
+      - name: Preserve unstripped compile-only core for PR validation
+        if: ${{ matrix.config.emscripten || matrix.config.android || matrix.config.platform == 'macos-x86_64' || matrix.config.make_platform }}
+        env:
+          TEST_EXPORTS: '0'
+          RELEASE_DEBUG_INFO: '1'
+        run: bash scripts/stage-ci-core.sh "${{ matrix.config.platform }}" "${{ matrix.config.artifact }}" ci-core
+
+      - name: Upload production CI intermediate
+        if: ${{ matrix.config.emscripten || matrix.config.android || matrix.config.platform == 'macos-x86_64' || matrix.config.make_platform }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-core-${{ matrix.config.platform }}
+          overwrite: true
+          path: ci-core/
+          if-no-files-found: error
+          retention-days: 14
+
+      # ----------------------------------------------------------------
+      # Package: emit
+      #   dist/<core-name>                   (stripped, shipped binary)
+      #   dist/<core-name>-debug.tar.gz      (split debug symbols)
+      # The shipped binary keeps a debug-link / dSYM reference so a
+      # debugger can find the symbols when the .tar.gz is extracted
+      # alongside it.
+      # ----------------------------------------------------------------
+      - name: Package (Linux native build)
+        if: ${{ runner.os == 'Linux' && !matrix.config.emscripten && !matrix.config.android }}
+        run: |
+          set -e
+          mkdir -p dist
+          SRC="${{ matrix.config.artifact }}"
+          EXT=$(echo "$SRC" | grep -o '\.[^.]*$')
+          OUT="virtualjaguar_libretro-${{ matrix.config.platform }}${EXT}"
+          DBG="${OUT}.debug"
+          cp "$SRC" "dist/${OUT}"
+          # A cross-built ARM core needs the cross objcopy -- Ubuntu's
+          # binutils is single-target, so the host one cannot read an ARM ELF
+          # and the split-debug step would fail (or, worse, be skipped).
+          case "${{ matrix.config.cross_arm }}" in
+            armhf) OBJCOPY=arm-linux-gnueabihf-objcopy ;;
+            arm64) OBJCOPY=aarch64-linux-gnu-objcopy ;;
+            *)     OBJCOPY=objcopy ;;
+          esac
+          "$OBJCOPY" --only-keep-debug "dist/${OUT}" "dist/${DBG}"
+          "$OBJCOPY" --strip-debug --strip-unneeded "dist/${OUT}"
+          ( cd dist && "$OBJCOPY" --add-gnu-debuglink="${DBG}" "${OUT}" )
+          tar -C dist -czf "dist/virtualjaguar_libretro-${{ matrix.config.platform }}-debug.tar.gz" "${DBG}"
+          rm "dist/${DBG}"
+
+      - name: Package (Android)
+        if: matrix.config.android
+        run: |
+          set -e
+          mkdir -p dist
+          SRC="${{ matrix.config.artifact }}"
+          OUT="virtualjaguar_libretro-${{ matrix.config.platform }}.so"
+          DBG="${OUT}.debug"
+          cp "$SRC" "dist/${OUT}"
+          # NDK ships its own objcopy/strip; use the unprefixed system one
+          # (the artifact is already linked).  llvm-objcopy works on all ABIs.
+          OBJCOPY="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objcopy"
+          if [ ! -x "$OBJCOPY" ]; then OBJCOPY=objcopy; fi
+          "$OBJCOPY" --only-keep-debug "dist/${OUT}" "dist/${DBG}"
+          "$OBJCOPY" --strip-debug --strip-unneeded "dist/${OUT}"
+          ( cd dist && "$OBJCOPY" --add-gnu-debuglink="${DBG}" "${OUT}" )
+          tar -C dist -czf "dist/virtualjaguar_libretro-${{ matrix.config.platform }}-debug.tar.gz" "${DBG}"
+          rm "dist/${DBG}"
+
+      - name: Package (Emscripten)
+        if: matrix.config.emscripten
+        run: |
+          set -e
+          mkdir -p dist
+          SRC="${{ matrix.config.artifact }}"
+          OUT="virtualjaguar_libretro-${{ matrix.config.platform }}.bc"
+          cp "$SRC" "dist/${OUT}"
+          # LLVM bitcode keeps debug info inline; ship the .bc twice with
+          # the second copy gzipped under -debug for symmetry with the
+          # other platforms.
+          gzip -c "dist/${OUT}" > "dist/virtualjaguar_libretro-${{ matrix.config.platform }}-debug.tar.gz"
+
+      - name: Package (macOS / iOS / tvOS)
+        if: ${{ runner.os == 'macOS' }}
+        run: |
+          set -e
+          mkdir -p dist
+          SRC="${{ matrix.config.artifact }}"
+          EXT=$(echo "$SRC" | grep -o '\.[^.]*$')
+          OUT="virtualjaguar_libretro-${{ matrix.config.platform }}${EXT}"
+          cp "$SRC" "dist/${OUT}"
+          # dsymutil produces a .dSYM bundle next to the binary
+          dsymutil "dist/${OUT}" -o "dist/${OUT}.dSYM"
+          # Strip debug info from the shipped binary (-S = local syms,
+          # -x = remove non-globals); keeps externals so dlsym still works
+          strip -S -x "dist/${OUT}"
+          tar -C dist -czf "dist/virtualjaguar_libretro-${{ matrix.config.platform }}-debug.tar.gz" "${OUT}.dSYM"
+          rm -rf "dist/${OUT}.dSYM"
+
+      - name: Package (Windows MSYS2)
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          set -e
+          mkdir -p dist
+          SRC="${{ matrix.config.artifact }}"
+          OUT="virtualjaguar_libretro-${{ matrix.config.platform }}.dll"
+          DBG="${OUT}.debug"
+          cp "$SRC" "dist/${OUT}"
+          objcopy --only-keep-debug "dist/${OUT}" "dist/${DBG}"
+          objcopy --strip-debug --strip-unneeded "dist/${OUT}"
+          ( cd dist && objcopy --add-gnu-debuglink="${DBG}" "${OUT}" )
+          tar -C dist -czf "dist/virtualjaguar_libretro-${{ matrix.config.platform }}-debug.tar.gz" "${DBG}"
+          rm "dist/${DBG}"
+
+      # ----------------------------------------------------------------
+      # cue2cdi -- standalone CUE/BIN -> DiscJuggler CDI converter
+      # (test/tools/cue2cdi.c, `make cue2cdi`).  Shipped for the three
+      # common desktop platforms only; dropping the binary into dist/
+      # rides the existing artifact -> stage -> release/nightly flow, so
+      # it appears in both tagged releases and the rolling nightly and
+      # lands in SHA256SUMS automatically.  macOS ships one universal
+      # (arm64 + x86_64) binary built from the arm64 job; Windows from
+      # the MINGW64 job.
+      # ----------------------------------------------------------------
+      - name: Build cue2cdi (shipped desktop platforms)
+        if: ${{ matrix.config.platform == 'linux-x86_64' || matrix.config.platform == 'macos-arm64' || matrix.config.platform == 'windows-x86_64' }}
+        run: |
+          set -e
+          mkdir -p dist
+          case "${{ matrix.config.platform }}" in
+            linux-x86_64)
+              make cue2cdi CC="${{ matrix.config.cc }}"
+              cp test/tools/cue2cdi dist/cue2cdi-linux-x86_64
+              strip dist/cue2cdi-linux-x86_64
+              ;;
+            macos-arm64)
+              clang -O2 -Wall -std=c99 -arch arm64 -arch x86_64 \
+                -o dist/cue2cdi-macos-universal test/tools/cue2cdi.c
+              strip -S -x dist/cue2cdi-macos-universal
+              ;;
+            windows-x86_64)
+              gcc -O2 -Wall -std=c99 -o dist/cue2cdi-windows-x86_64.exe test/tools/cue2cdi.c
+              strip dist/cue2cdi-windows-x86_64.exe
+              ;;
+          esac
+
+      # ----------------------------------------------------------------
+      # macOS desktop cores and cue2cdi: Developer ID sign + notarize (#989).
+      # Runs after strip (it would invalidate the signature) and before the
+      # upload.  Bare Mach-O files cannot be stapled; they are notarized in
+      # a zip and Gatekeeper checks the ticket online.  iOS/tvOS dylibs are
+      # NOT signed here (Developer ID does not apply to them; Provenance
+      # signs them when it embeds them).  Without the APPLE_* secrets the
+      # action only warns.  Needs a macOS runner: macos-arm64 also carries
+      # the universal cue2cdi built above.
+      # ----------------------------------------------------------------
+      - name: Developer ID sign and notarize (macOS core${{ matrix.config.platform == 'macos-arm64' && ' + cue2cdi' || '' }})
+        if: ${{ matrix.config.platform == 'macos-arm64' || matrix.config.platform == 'macos-x86_64' }}
+        uses: ./.github/actions/macos-sign
+        with:
+          paths: |
+            dist/virtualjaguar_libretro-${{ matrix.config.platform }}.dylib
+            ${{ matrix.config.platform == 'macos-arm64' && 'dist/cue2cdi-macos-universal' || '' }}
+          notarize: 'true'
+          apple-developer-id-p12-base64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          apple-developer-id-p12-password: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          apple-notary-key-id: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          apple-notary-issuer-id: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          apple-notary-key-p8-base64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: virtualjaguar_libretro-${{ matrix.config.platform }}
+          path: dist/
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------
+  # PS Vita (vitasdk) - cross-compiled .a static archive
+  # ----------------------------------------------------------------
+  vita-build:
+    name: build-vita
+    needs: [guard]
+    runs-on: ubuntu-latest
+    container:
+      image: vitasdk/vitasdk:latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        env:
+          RELEASE_DEBUG_INFO: '1'
+          TEST_EXPORTS: '0'
+        run: make -j4 platform=vita
+
+      - name: Preserve unstripped production core for PR validation
+        env:
+          TEST_EXPORTS: '0'
+          RELEASE_DEBUG_INFO: '1'
+        run: bash scripts/stage-ci-core.sh vita virtualjaguar_libretro_vita.a ci-core
+
+      - name: Upload production CI intermediate
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-core-vita
+          overwrite: true
+          path: ci-core/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Package
+        run: |
+          set -e
+          mkdir -p dist
+          OUT="virtualjaguar_libretro-vita.a"
+          cp virtualjaguar_libretro_vita.a "dist/${OUT}"
+          # Static archive — extract debug info via objcopy on the archive
+          # itself.  arm-vita-eabi-objcopy is in the vitasdk image.
+          OBJCOPY=arm-vita-eabi-objcopy
+          "$OBJCOPY" --only-keep-debug "dist/${OUT}" "dist/${OUT}.debug" || cp "dist/${OUT}" "dist/${OUT}.debug"
+          "$OBJCOPY" --strip-debug "dist/${OUT}" || true
+          tar -C dist -czf "dist/virtualjaguar_libretro-vita-debug.tar.gz" "${OUT}.debug"
+          rm "dist/${OUT}.debug"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: virtualjaguar_libretro-vita
+          path: dist/
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------
+  # Nintendo Switch (devkitPro libnx) - .a static archive
+  # ----------------------------------------------------------------
+  switch-build:
+    name: build-switch
+    needs: [guard]
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        env:
+          DEVKITPRO: /opt/devkitpro
+          RELEASE_DEBUG_INFO: '1'
+          TEST_EXPORTS: '0'
+        run: make -j4 platform=libnx
+
+      - name: Preserve unstripped production core for PR validation
+        env:
+          TEST_EXPORTS: '0'
+          RELEASE_DEBUG_INFO: '1'
+        run: bash scripts/stage-ci-core.sh switch virtualjaguar_libretro_libnx.a ci-core
+
+      - name: Upload production CI intermediate
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-core-switch
+          overwrite: true
+          path: ci-core/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Package
+        run: |
+          set -e
+          mkdir -p dist
+          OUT="virtualjaguar_libretro-switch.a"
+          cp virtualjaguar_libretro_libnx.a "dist/${OUT}"
+          OBJCOPY=/opt/devkitpro/devkitA64/bin/aarch64-none-elf-objcopy
+          "$OBJCOPY" --only-keep-debug "dist/${OUT}" "dist/${OUT}.debug" || cp "dist/${OUT}" "dist/${OUT}.debug"
+          "$OBJCOPY" --strip-debug "dist/${OUT}" || true
+          tar -C dist -czf "dist/virtualjaguar_libretro-switch-debug.tar.gz" "${OUT}.debug"
+          rm "dist/${OUT}.debug"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: virtualjaguar_libretro-switch
+          path: dist/
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------
+  # Desktop jagcd tools (pinned chdman + jagcd-to-chd + jagcd-chd-check).
+  # Same three hosts as cue2cdi. Runs in parallel with the core matrix;
+  # the release/nightly jobs wait on it so the zips land in SHA256SUMS
+  # and on the GitHub release next to the cores.
+  # ----------------------------------------------------------------
+  jagcd-tools:
+    name: jagcd tools (chdman)
+    needs: [guard]
+    uses: ./.github/workflows/chdman-tools.yml
+    secrets: inherit
+
+  # ----------------------------------------------------------------
+  # Standalone app packages (#839): macOS zip, Windows zip/setup,
+  # Linux AppImage/deb.  One reusable workflow also used by app.yml for
+  # PRs.  It uploads only final, contract-named files as `app-package-*`
+  # artifacts, so the release/nightly jobs' flatten-and-checksum steps
+  # attach them next to the cores with no further logic.  On a tag whose
+  # version is not the app's (a core-only release) it builds nothing.
+  # ----------------------------------------------------------------
+  app-packages:
+    name: App packages
+    needs: [guard]
+    uses: ./.github/workflows/app-package.yml
+    with:
+      release_tag: ${{ github.ref_type == 'tag' && github.ref_name || (github.ref == 'refs/heads/develop' && 'nightly' || 'prerelease') }}
+      sign: true
+    secrets: inherit
+
+  # ----------------------------------------------------------------
+  # Release: collect all artifacts, generate SHA256SUMS, build the
+  # release body from docs/RELEASE_NOTES_v<TAG>.md (artifact list
+  # and embedded SHA256 checksums always appended), then create the
+  # tagged release.  See SECURITY.md for binary verification docs.
+  # ----------------------------------------------------------------
+  release:
+    needs: [build, vita-build, switch-build, jagcd-tools, app-packages]
+    # Tag pushes only.  Everything below assumes GITHUB_REF_NAME is a vX.Y.Z
+    # tag (release-notes lookup, release title, `gh release create <TAG>`), so
+    # this guard is what keeps a develop push from creating a release literally
+    # named "develop".  The nightly job handles that case instead.
+    #
+    # The status checks spell out what the implicit success() gate meant before
+    # app-packages existed (every need succeeded), with one addition: the app
+    # job may be `skipped`, which is what a tag without an app to package
+    # produces.  A FAILED app job still blocks the release, like a failed
+    # tools build: re-run the failed jobs and the release follows.
+    if: |
+      startsWith(github.ref, 'refs/tags/v')
+      && !cancelled()
+      && needs.build.result == 'success'
+      && needs.vita-build.result == 'success'
+      && needs.switch-build.result == 'success'
+      && needs.jagcd-tools.result == 'success'
+      && (needs.app-packages.result == 'success' || needs.app-packages.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts/
+
+      - name: Stage release files
+        run: |
+          set -e
+          mkdir -p release
+          # Flatten one level: each artifact directory contains the
+          # binary + matching -debug.tar.gz; copy them all into release/.
+          # librashader-<triple> are intermediates of the app packages (the shader runtime built
+          # from source, librashader.yml): already inside the packages, not release assets.
+          find artifacts/ -mindepth 2 -type f -not -path 'artifacts/librashader-*' -not -path 'artifacts/ci-core-*' -exec cp {} release/ \;
+          # Include the RetroArch core .info file so frontend maintainers
+          # / users can drop it into RetroArch's info/ dir.  The same file
+          # is what gets PR'd to libretro/libretro-super after the release.
+          if [ -f dist/info/virtualjaguar_libretro.info ]; then
+            cp dist/info/virtualjaguar_libretro.info release/
+          fi
+          echo "==> Staged release files:"
+          ls -la release/
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -e
+          cd release
+          # Deterministic ordering, two-space format compatible with
+          # `sha256sum -c SHA256SUMS.txt` on Linux + Mac (with coreutils).
+          #
+          # Build it OUTSIDE the directory and move it in.  Redirecting straight
+          # to ./SHA256SUMS.txt races: the shell starts both pipeline stages at
+          # once, so `sort`'s redirect can create the (empty) file before
+          # `sha256sum`'s glob expands, leaving the manifest listing itself with
+          # the empty-file hash — which then fails `sha256sum --check` on that
+          # one line.  v2.3.2 happened to win the race; nightlies would not.
+          sha256sum -- * | sort -k 2 > "$RUNNER_TEMP/SHA256SUMS.txt"
+          mv "$RUNNER_TEMP/SHA256SUMS.txt" SHA256SUMS.txt
+          echo "==> SHA256SUMS.txt:"
+          cat SHA256SUMS.txt
+
+      - name: Prepare release body
+        id: prep_body
+        run: |
+          set -e
+          TAG="${GITHUB_REF_NAME}"
+          NOTES_FILE="docs/RELEASE_NOTES_${TAG}.md"
+          BODY_FILE="$RUNNER_TEMP/release_body.md"
+          if [ -f "$NOTES_FILE" ]; then
+            echo "==> Using curated release notes: $NOTES_FILE"
+            cp "$NOTES_FILE" "$BODY_FILE"
+          else
+            echo "==> No curated $NOTES_FILE found; generating notes from commits"
+            gh api repos/${{ github.repository }}/releases/generate-notes \
+              -f tag_name="${TAG}" --jq '.body' > "$BODY_FILE" 2>/dev/null || true
+          fi
+          # Append artifact list and embedded SHA256 checksums so users can
+          # verify binaries directly from the release page without needing to
+          # download SHA256SUMS.txt first.  See SECURITY.md for details.
+          {
+            echo
+            echo "---"
+            echo
+            echo "## Artifacts in this release"
+            echo
+            echo '```'
+            find release -mindepth 1 -maxdepth 1 -type f -printf "%f\n" | sort
+            echo '```'
+            echo
+            echo "## SHA-256 checksums"
+            echo
+            echo "Verify with \`sha256sum --check SHA256SUMS.txt\` (Linux) or"
+            echo "\`shasum -a 256 --check SHA256SUMS.txt\` (macOS)."
+            echo "See [SECURITY.md](https://github.com/${{ github.repository }}/blob/${{ github.event.repository.default_branch }}/SECURITY.md)"
+            echo "for full verification instructions and antivirus false-positive guidance."
+            echo
+            echo '```'
+            cat release/SHA256SUMS.txt
+            echo '```'
+          } >> "$BODY_FILE"
+          echo "body_file=$BODY_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release create "${TAG}" \
+            --title "${TAG}" \
+            --notes-file "${{ steps.prep_body.outputs.body_file }}" \
+            release/*
+
+  # ----------------------------------------------------------------
+  # Nightly: same artifacts, published to a single rolling `nightly`
+  # prerelease that is moved onto each new develop tip, plus a pinned
+  # tracking issue that always shows the current build.
+  #
+  # Gating: `needs` covers the build jobs only, so this publishes a
+  # commit that COMPILES on all 24 targets.  It does NOT wait on
+  # c-cpp.yml / acid-test.yml / regression-test.yml, which run
+  # independently on the same push — a commit that builds but fails a
+  # test can still ship a nightly.  The release body says so; do not
+  # upgrade that wording to "passes all CI" without also switching this
+  # to a `workflow_run` trigger (see artifacts.yml for that idiom).
+  # ----------------------------------------------------------------
+  nightly:
+    name: Update rolling prerelease
+    needs: [build, vita-build, switch-build, jagcd-tools, app-packages]
+    # The app packages (app-packages) are waited for and not required either:
+    # a macOS notarization outage must not withhold the core nightly.
+    # Wait for the tools build, but do not REQUIRE it.  chdman is an
+    # auxiliary desktop helper; the nightly's product is the 24 core
+    # binaries.  Gating the publish on it meant a missing pkg-config
+    # package on a runner image silently withheld three days of good core
+    # builds (2026-08-18).  Tagged releases still require it below, because
+    # there the tools zips are part of the deliverable.
+    if: |
+      always()
+      && (github.ref == 'refs/heads/develop'
+          || startsWith(github.ref, 'refs/heads/release/'))
+      && needs.build.result == 'success'
+      && needs.vita-build.result == 'success'
+      && needs.switch-build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # move the tag, create/update the release
+      issues: write     # update + pin the tracking issue
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      # One rolling tag per lane.  Deliberately NOT a per-branch or per-PR
+      # tag that gets cleaned up on release: one rolling tag has a lifecycle
+      # the project already understands, needs no teardown step anyone can
+      # forget, and cannot orphan tags when a release branch is renamed or
+      # abandoned (issue #507).  Neither name matches the v* filter, so a
+      # CI-pushed tag can never re-enter the release path.
+      TAG: ${{ github.ref == 'refs/heads/develop' && 'nightly' || 'prerelease' }}
+      LANE: ${{ github.ref == 'refs/heads/develop' && 'Nightly' || 'Release candidate' }}
+      # Must match issue #236's title exactly (including the emoji / [Release]
+      # prefix added by hand). Label lookup is preferred; this is the
+      # fallback if the nightly-tracker label is ever removed.
+      ISSUE_TITLE: '🐈‍⬛  [Release] Nightly builds — download, install, and what they are'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history: the release body diffs against the commit the
+          # `nightly` tag pointed at on the previous run.
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts/
+
+      - name: Stage release files
+        run: |
+          set -e
+          mkdir -p release
+          # (librashader-<triple> are intermediates of the app packages, not release assets.)
+          find artifacts/ -mindepth 2 -type f -not -path 'artifacts/librashader-*' -not -path 'artifacts/ci-core-*' -exec cp {} release/ \;
+          # The .info file's display_version names the last TAGGED release, so
+          # shipping it verbatim would label a nightly "v2.3.2".  Rewrite it to
+          # the build's actual identity — this also makes it obvious that a
+          # nightly .info is not the file to PR to libretro-super.
+          if [ -f dist/info/virtualjaguar_libretro.info ]; then
+            sed "s/^display_version = \".*\"/display_version = \"$(sed -n 's/^CORE_BASE_VERSION[[:space:]]*:*=[[:space:]]*\(.*\)/\1/p' Makefile | head -1)-nightly-${GITHUB_SHA:0:7}\"/" \
+              dist/info/virtualjaguar_libretro.info > release/virtualjaguar_libretro.info
+          fi
+          echo "==> Staged nightly files:"
+          ls -la release/
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -e
+          cd release
+          # Written outside the directory then moved in — see the release job's
+          # copy of this step for why the obvious redirect races.
+          sha256sum -- * | sort -k 2 > "$RUNNER_TEMP/SHA256SUMS.txt"
+          mv "$RUNNER_TEMP/SHA256SUMS.txt" SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Prepare rolling release body
+        id: prep_body
+        run: |
+          set -e
+          SHA="${GITHUB_SHA}"
+          SHORT_SHA="${SHA:0:7}"
+          BODY_FILE="$RUNNER_TEMP/rolling_body.md"
+          RUN_URL="${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}"
+          BASE_VERSION=$(sed -n 's/^CORE_BASE_VERSION[[:space:]]*:*=[[:space:]]*\(.*\)/\1/p' Makefile | head -1)
+
+          # Where the rolling tag pointed BEFORE this run — captured here
+          # because the next step moves it.
+          PREV_SHA=$(gh api "repos/${REPO}/git/refs/tags/${TAG}" --jq '.object.sha' 2>/dev/null || echo "")
+
+          CHANGES=""
+          if [ -n "$PREV_SHA" ] && [ "$PREV_SHA" != "$SHA" ] \
+            && git cat-file -e "${PREV_SHA}^{commit}" 2>/dev/null; then
+            CHANGES=$(git log --oneline --no-merges "${PREV_SHA}..${SHA}" | head -40)
+          fi
+          [ -n "$CHANGES" ] || CHANGES=$(git log --oneline --no-merges -10)
+
+          {
+            echo "### ${LANE} \`${SHORT_SHA}\` — \`${BASE_VERSION}\` (\`${GITHUB_REF_NAME}\`)"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **Commit** | [\`${SHORT_SHA}\`](${GITHUB_SERVER_URL}/${REPO}/commit/${SHA}) |"
+            echo "| **Built** | $(date -u '+%Y-%m-%d %H:%M UTC') |"
+            echo "| **CI run** | [build log](${RUN_URL}) |"
+            echo "| **Branch** | \`${GITHUB_REF_NAME}\` |"
+            echo
+            P="> Automatic build of the \`${GITHUB_REF_NAME}\` tip, replaced on every push."
+            P="$P It compiled on all 24 targets; it has **not** been through the"
+            P="$P test suite or any manual QA. For a stable build use the"
+            P="$P [latest release](${GITHUB_SERVER_URL}/${REPO}/releases/latest)."
+            if [ "${TAG}" = "prerelease" ]; then
+              P="$P This is a RELEASE CANDIDATE from a release branch, not a release:"
+              P="$P it exists so the 24-platform matrix runs on the code about to"
+              P="$P ship, instead of first meeting it at the tag."
+            fi
+            echo "$P"
+            echo
+            echo "The core logs its identity as \`${BASE_VERSION} ${SHORT_SHA}\` at startup — quote that line when reporting a bug against this build."
+            echo
+            echo "### Changes since the previous ${LANE,,}"
+            echo
+            echo '```'
+            echo "${CHANGES}"
+            echo '```'
+            echo
+            echo "### Artifacts"
+            echo
+            echo '```'
+            find release -mindepth 1 -maxdepth 1 -type f -printf "%f\n" | sort
+            echo '```'
+            echo
+            echo "Each platform ships alongside a \`-debug.tar.gz\` of its split debug symbols; extract it next to the binary to get symbolised backtraces."
+            echo
+            echo "### SHA-256 checksums"
+            echo
+            P="Verify with \`sha256sum --check SHA256SUMS.txt\` (Linux) or"
+            P="$P \`shasum -a 256 --check SHA256SUMS.txt\` (macOS). See"
+            P="$P [SECURITY.md](${GITHUB_SERVER_URL}/${REPO}/blob/${{ github.event.repository.default_branch }}/SECURITY.md)."
+            echo "$P"
+            echo
+            echo '```'
+            cat release/SHA256SUMS.txt
+            echo '```'
+          } > "$BODY_FILE"
+          echo "body_file=$BODY_FILE" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Move the rolling tag
+        run: |
+          set -e
+          # -F (typed) for force so it serialises as a JSON boolean; -f would
+          # send the string "true", which the refs API rejects with 422.
+          gh api "repos/${REPO}/git/refs/tags/${TAG}" \
+            -X PATCH -f sha="${GITHUB_SHA}" -F force=true >/dev/null 2>&1 || \
+          gh api "repos/${REPO}/git/refs" \
+            -X POST -f ref="refs/tags/${TAG}" -f sha="${GITHUB_SHA}" >/dev/null
+
+      - name: Publish rolling prerelease
+        run: |
+          set -e
+          TITLE="${LANE} ${{ steps.prep_body.outputs.short_sha }}"
+          # Update in place rather than delete-and-recreate: asset names are
+          # deterministic per platform, so --clobber replaces them without ever
+          # leaving /releases/tag/nightly 404ing mid-run, and the release keeps
+          # its id (so anyone watching it stays subscribed).
+          if gh release view "${TAG}" --repo "${REPO}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" --repo "${REPO}" \
+              --title "${TITLE}" \
+              --notes-file "${{ steps.prep_body.outputs.body_file }}" \
+              --target "${GITHUB_SHA}" \
+              --prerelease --draft=false
+            gh release upload "${TAG}" --repo "${REPO}" release/* --clobber
+            # `gh release edit` leaves published_at at the original create
+            # date, so the Releases list kept showing "Published Aug 1" while
+            # assets/body moved every develop push — looking abandoned under
+            # newer stable tags. Draft→publish is the only API that rewrites
+            # that timestamp; assets stay attached and the id is unchanged.
+            # Window is one round-trip.
+            REL_ID=$(gh api "repos/${REPO}/releases/tags/${TAG}" --jq .id)
+            gh api -X PATCH "repos/${REPO}/releases/${REL_ID}" -F draft=true >/dev/null
+            gh api -X PATCH "repos/${REPO}/releases/${REL_ID}" \
+              -F draft=false -F prerelease=true >/dev/null
+          else
+            gh release create "${TAG}" --repo "${REPO}" \
+              --title "${TITLE}" \
+              --notes-file "${{ steps.prep_body.outputs.body_file }}" \
+              --prerelease \
+              --target "${GITHUB_SHA}" \
+              release/*
+          fi
+
+      - name: Update pinned tracking issue
+        # develop only: issue #236 documents the NIGHTLY, and its title, label
+        # and prose are all nightly-specific.  A release-candidate publish has
+        # no tracking issue and must not rewrite that one (issue #507).
+        if: github.ref == 'refs/heads/develop'
+        # Never fail the publish over the issue: the binaries are already out.
+        continue-on-error: true
+        env:
+          # The app section is listed only when this nightly actually carries
+          # app packages (the job skips commits without app/, and a failed
+          # package build does not block the core nightly).
+          APP_BUILT: ${{ needs.app-packages.result == 'success' }}
+        run: |
+          set -e
+          SHORT_SHA="${{ steps.prep_body.outputs.short_sha }}"
+          BODY_FILE="$RUNNER_TEMP/issue_body.md"
+          {
+            echo "## Latest nightly"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **Build** | [\`${SHORT_SHA}\`](${GITHUB_SERVER_URL}/${REPO}/commit/${GITHUB_SHA}) |"
+            echo "| **Built** | $(date -u '+%Y-%m-%d %H:%M UTC') |"
+            echo "| **Download** | [\`nightly\` release](${GITHUB_SERVER_URL}/${REPO}/releases/tag/nightly) |"
+            echo "| **CI run** | [build log](${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}) |"
+            if [ "$APP_BUILT" = "true" ]; then
+              echo "| **App** | [Virtual Jaguar desktop app](#the-virtual-jaguar-app-nightly) (macOS, Windows, Linux) |"
+            fi
+            echo
+            if [ "$APP_BUILT" = "true" ]; then
+              DL="${GITHUB_SERVER_URL}/${REPO}/releases/download/nightly"
+              RAW="https://raw.githubusercontent.com/${REPO}/master/tools"
+              echo "### The Virtual Jaguar app (nightly)"
+              echo
+              echo "The standalone desktop app, built from this same commit. These links always point at the newest nightly."
+              echo
+              echo "| System | Download |"
+              echo "|---|---|"
+              echo "| macOS (Apple Silicon + Intel) | [VirtualJaguar-nightly-macos-universal.zip](${DL}/VirtualJaguar-nightly-macos-universal.zip) |"
+              echo "| Windows x64 | [portable .zip](${DL}/VirtualJaguar-nightly-windows-x64.zip) · [installer .exe](${DL}/VirtualJaguar-nightly-windows-x64-setup.exe) |"
+              echo "| Windows ARM64 | [portable .zip](${DL}/VirtualJaguar-nightly-windows-arm64.zip) · [installer .exe](${DL}/VirtualJaguar-nightly-windows-arm64-setup.exe) |"
+              echo "| Linux x86_64 | [AppImage](${DL}/VirtualJaguar-nightly-linux-x86_64.AppImage) · [.deb](${DL}/virtualjaguar_nightly_amd64.deb) |"
+              echo "| Linux aarch64 | [AppImage](${DL}/VirtualJaguar-nightly-linux-aarch64.AppImage) · [.deb](${DL}/virtualjaguar_nightly_arm64.deb) |"
+              echo "| Linux x86_64 (Flatpak) | [.flatpak](${DL}/VirtualJaguar-nightly-linux-x86_64.flatpak) |"
+              echo
+              echo "Or install / update it with one line (pass \`--what both\` for the app and the RetroArch core):"
+              echo
+              echo '```sh'
+              echo "curl -fsSL ${RAW}/install.sh | sh -s -- --what app --channel nightly"
+              echo '```'
+              echo
+              echo '```powershell'
+              echo "\$env:VJ_WHAT='app'; \$env:VJ_CHANNEL='nightly'; irm ${RAW}/install.ps1 | iex"
+              echo '```'
+              echo
+              P="Nightly macOS builds (the app, the cores and the command-line tools) are Developer ID"
+              P="$P signed and notarized by Apple when the release signing secrets are configured;"
+              P="$P without them macOS needs right-click > Open the first time."
+              P="$P Windows binaries are not code-signed yet, so SmartScreen may warn."
+              echo "$P"
+              echo
+              echo "---"
+              echo
+            fi
+            echo "---"
+            echo
+            echo "### What these are"
+            echo
+            P="Every push to \`develop\` rebuilds the core for all 24 supported platforms"
+            P="$P and replaces the single"
+            P="$P [\`nightly\`](${GITHUB_SERVER_URL}/${REPO}/releases/tag/nightly) prerelease."
+            P="$P There is only ever one nightly — the current tip."
+            echo "$P"
+            echo
+            echo "| | Stable | Nightly |"
+            echo "|---|---|---|"
+            echo "| Source | tagged \`vX.Y.Z\` on \`master\` | every push to \`develop\` |"
+            echo "| Gate | full CI + release checklist | compiles on all 24 targets |"
+            echo "| Frequency | periodic | continuous |"
+            echo "| Use it for | playing | testing a fix before it ships |"
+            echo
+            P="Nightlies are **not** gated on the test suite, the acid suite, or the"
+            P="$P screenshot regression run — those workflows report separately on the"
+            P="$P same commit. A nightly can build cleanly and still be broken."
+            echo "$P"
+            echo
+            echo "### Installing"
+            echo
+            echo "1. Download \`virtualjaguar_libretro-<platform>.<ext>\` for your system from the [\`nightly\` release](${GITHUB_SERVER_URL}/${REPO}/releases/tag/nightly)."
+            P="2. **Rename it**, dropping the \`-<platform>\` part —"
+            P="$P \`virtualjaguar_libretro-linux-x86_64.so\` becomes"
+            P="$P \`virtualjaguar_libretro.so\`. RetroArch pairs a core with its metadata"
+            P="$P by exact basename, so a core left under the download name loads with"
+            P="$P no name, no version and no core options."
+            echo "$P"
+            echo "3. Drop it into RetroArch's \`cores/\` directory, replacing the existing \`virtualjaguar_libretro.<ext>\`."
+            echo "4. Copy \`virtualjaguar_libretro.info\` into RetroArch's \`info/\` directory to see the nightly version string in the core list."
+            echo
+            echo "RetroArch's own Core Updater always serves the **stable** buildbot core. Installing a nightly by hand means the updater may overwrite it later."
+            echo
+            echo "### Reporting a bug in a nightly"
+            echo
+            echo "The core logs its exact identity at startup:"
+            echo
+            echo '```'
+            echo "Virtual Jaguar vX.Y.Z <gitrev>"
+            echo '```'
+            echo
+            P="Include that line — it is the only way to tell which nightly you ran."
+            P="$P A RetroArch log is worth more than a description: the core has a"
+            P="$P watchdog that names the failing subsystem (\`gpu_pc_escape\`,"
+            P="$P \`cd_seek_wedge\`, \`video_stall\`, …) at the moment it breaks."
+            echo "$P"
+            echo
+            echo "### Verifying a download"
+            echo
+            P="Each release lists SHA-256 checksums, and every platform has a matching"
+            P="$P \`-debug.tar.gz\` of split debug symbols. See"
+            P="$P [SECURITY.md](${GITHUB_SERVER_URL}/${REPO}/blob/${{ github.event.repository.default_branch }}/SECURITY.md)"
+            P="$P for verification steps and antivirus false-positive guidance."
+            echo "$P"
+            echo
+            echo "---"
+            echo
+            echo "> Auto-updated by CI on every nightly build. Edits here are overwritten."
+          } > "$BODY_FILE"
+
+          # Find the existing tracker without the search API, which is
+          # eventually-consistent — a miss opens a DUPLICATE issue, and then
+          # another on every run after that, so the lookup has to be exact.
+          #
+          # Label first: filtering is server-side and stays exact no matter how
+          # many issues the repo accumulates.  Exact-title match is the fallback
+          # for the very first run (before the label exists) and for the case
+          # where the label was removed by hand.  Both must miss to duplicate.
+          LABEL=nightly-tracker
+          gh label create "$LABEL" --repo "${REPO}" --color 0E8A16 \
+            --description "Auto-updated nightly build tracker" >/dev/null 2>&1 || true
+
+          NUM=$(gh issue list --repo "${REPO}" --state all --label "$LABEL" \
+                  --limit 1 --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+          if [ -z "$NUM" ]; then
+            NUM=$(gh issue list --repo "${REPO}" --state all --limit 500 \
+                    --json number,title \
+                    --jq "map(select(.title == \"${ISSUE_TITLE}\")) | .[0].number // empty")
+          fi
+
+          if [ -n "$NUM" ]; then
+            gh issue edit "$NUM" --repo "${REPO}" --body-file "$BODY_FILE" \
+              --add-label "$LABEL" >/dev/null
+          else
+            NUM=$(gh issue create --repo "${REPO}" \
+                    --title "${ISSUE_TITLE}" \
+                    --body-file "$BODY_FILE" \
+                    | grep -oE '[0-9]+$')
+            gh issue edit "$NUM" --repo "${REPO}" --add-label "$LABEL" >/dev/null 2>&1 || \
+              echo "::warning::could not label tracking issue #${NUM}; title match is now the only lookup"
+            echo "==> Created tracking issue #${NUM}"
+          fi
+
+          # Pinning has no REST endpoint; pinIssue is GraphQL-only and caps at
+          # 3 pinned issues per repo.  Re-pinning an already-pinned issue errors
+          # harmlessly, but so does hitting the cap or lacking permission — and
+          # a pinned issue is the whole point, so warn rather than swallow it.
+          ID=$(gh api "repos/${REPO}/issues/${NUM}" --jq '.node_id')
+          # shellcheck disable=SC2016  # $id is a GraphQL variable; it must NOT
+          # be expanded by the shell — gh binds it from the -f id= argument.
+          gh api graphql -f query='mutation($id:ID!){pinIssue(input:{issueId:$id}){issue{number}}}' \
+            -f id="$ID" >/dev/null 2>&1 || \
+            echo "::warning::could not pin issue #${NUM} (already pinned, 3-pin cap, or permission)"
+
+          echo "==> Tracking issue: ${GITHUB_SERVER_URL}/${REPO}/issues/${NUM}"

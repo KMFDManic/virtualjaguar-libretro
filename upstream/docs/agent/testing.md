@@ -1,0 +1,348 @@
+# Testing detail
+
+Detail for [`AGENTS.md`](../../AGENTS.md). Local-only RetroAchievements validation — no RA
+account/API/server. `test/tools/test_rcheevos_e2e.sh` downloads pinned `RCHEEVOS_REF` and
+verifies `rc_libretro` mapping (`RC_CONSOLE_ATARI_JAGUAR`) matches host RAM.
+
+## Shared test harness (`test/harness/`)
+
+New tests should use `test/harness/harness.h` — shared lib eliminating dlopen/init/run
+boilerplate (see header's AGENT QUICK-START). Features:
+
+- Common CLI: `--json`, `--frames N`, `--bios`, `--option K=V`, `--quiet`.
+  `--bios` sets only the CART BIOS option; CD boot needs `--option virtualjaguar_cd_boot_mode=bios`
+  (check the `[BOOT] CD game, mode=BIOS` log line). `--input-bitmasks` answers GET_INPUT_BITMASKS
+  like RetroArch does (default harness takes the per-button input path).
+- Scripted input: `--press FRAME:BUTTON[:HOLD]` (repeatable; buttons `up down left right a b c
+  pause option 0-6`) — enough to navigate menus into gameplay headlessly. Programmatic:
+  `harness_press()` / `harness_input_cb`.
+- Log verbosity env: `VJ_HARNESS_LOG_INFO=1` passes core INFO (CD trace dumps),
+  `VJ_HARNESS_LOG_DEBUG=1` adds DEBUG (per-call CD HLE trace).
+- Automatic audio/video stats; `harness_dlsym()` probes internal state; `--json` machine output.
+- Probe modules: `dsp_probe.h` (DSP registers, PC escape, LTXD ratio, RAM dumps),
+  `timing_probe.h` (per-frame halflines, cycles, wall time, speed ratio).
+
+Build: `cc -O2 -Wall -std=c99 $(INCFLAGS) -o test_foo test_foo.c test/harness/harness.c
+[probe.c...] -ldl -lm`. New probe: create `test/harness/foo_probe.h` + `.c`, resolve via
+`harness_dlsym()`.
+
+## Key harnesses
+
+- `test/regression_test.sh` — screenshot regression vs `test/baselines/` via miniretro (built
+  from source first run; `MINIRETRO_BIN` env to skip). Baselines **not committed** — no-baseline
+  ROM reports `NEW` and prints the `cp` command; first run on fresh clone establishes them.
+- `test/tools/test_dsp_audio_diag.c` — DSP audio diagnostic (`make dsp-diag DSP_DIAG_ROM=path`);
+  detects PC escape, bank init failures, silent LTXD.
+- `test/tools/test_frame_timing.c` — per-frame timing (`make frame-timing FRAME_TIMING_ROM=path`);
+  halflines/cycles/VBlanks per frame, wall-clock speed ratio, anomaly detection. `--csv`, `--json`.
+- `test/test_audio_clipping.c` — detects loud-broken audio (saturation density, run length,
+  sustained loud RMS). Catches Skyhammer/IS2 "saturated square wave".
+- `test/test_audio_presence.c` — counterpart: asserts audio present in a known-good envelope
+  (RMS in `[floor, ceiling]`, onset reached, no long zero runs). **Required to catch the
+  silencing-regression class** where a "fix" drops RMS to zero (clipping passes, game silent).
+  Iron Soldier 1 baseline: RMS ~1175 on develop.
+- `test/tools/hires_box_check.c` — internal-res (hi-res Stage 1) inertness gate: every 2x frame
+  must be exact 2×2 box replication of a 1x reference (`frame_hash_ab` CSV). Frames adjacent to a
+  presented-dimension change excluded.
+- `test/tools/hires_state_digest.c` — savestate FNV digests at frames 300/600/900; diff a 1x run
+  vs `virtualjaguar_internal_resolution=2x` to prove the machine can't see the option.
+- `test/tools/test_memory_map.c` — asserts `SET_MEMORY_MAPS`,
+  `SET_SUPPORT_ACHIEVEMENTS=true`, descriptor layout.
+- `test/tools/blit_memo_verify` + `test/tools/blit_memo_sweep.sh` — soundness gate for blit
+  memoization (`virtualjaguar_blit_memo`, #411, `docs/blit-memo.md`). Verify mode never skips:
+  runs every would-be skip live and compares write log + post-launch state. **Run before adding
+  `virtualjaguar_blit_memo` to any titledb row.** Exit 3 = "thin" (too few checks) — a title
+  that never repeats a blit stream is unverified, NOT clean; drive into gameplay with `--press`.
+  No public ROM repeats a stream → no CI gate; private-corpus sweep is the gate.
+- `test/tools/test_blitter_compare` — fast vs accurate blitter diff. Not in default `make`:
+  `cc -O2 -Wall -std=c99 -I./libretro-common/include -o test/tools/test_blitter_compare
+  test/tools/test_blitter_compare.c -ldl`.
+  Usage: `<core.so|.dylib> <rom> [frames] --load-state <file> [--frame-window F L]
+  [--cmd-filter MASK VAL] [--verbose-dump]` (note `--load-state`, not `--savestate`).
+- `test/test_dsp_mac40.c` — DSP 40-bit MAC accumulator (`dsp_acc40.h`).
+- `test/tools/dram_scale_sweep.sh` — **gate for any GPU/68K timing-model change** (#406). Sweeps
+  `VJ_DRAM_SCALE` 1..16 with `dram_timing` + `gpu_pipeline_timing` on; asserts a per-window
+  *liveness floor* on Doom's demo (default 30 flips per 300 fields; healthy 90-150), not merely
+  "flips != 0". Exit 77 = private ROM absent (skip, never silent pass). Timing wedges relocate
+  rather than disappear — a single-scale run proves nothing (#406 wedged at scales 4,8 before
+  Verilator constants, at 3 after). Env: `VJ_SCALES VJ_WINDOW VJ_MIN_FLIPS VJ_WARMUP_W`.
+- `test/tools/test_doom_pace_gate` + `test/tools/test_cf_canary` — **timing-campaign S0 gates**
+  (`docs/timing-campaign-plan.md`, #408/#401), run by `make TEST_EXPORTS=1 test`, ROM-gated (exit 77
+  -> recorded SKIP). **Tracking gates**: expected values live in `test/tools/timing_gate_baseline.txt`
+  = today's numbers beside the silicon target; a regression (moving AWAY from the target, liveness
+  breach) fails, movement TOWARD it prints `MOVED-TOWARD-TARGET` (re-baseline in the same PR).
+  - Doom: attract demo, fields 600..1500, prints `DOOM_PACE_RESULT` (mean fields/flip, gap histogram,
+    per-300-field flips, GPU busy-time/flip). Silicon bar 4.0 fields/flip (#434, band [3.5,4.5]);
+    develop = 1.993 (gaps 1:4 2:446 3:1). Pins the FAST blitter (census config); echoes options.
+    Busy-time = core `gpu_busy_*` census (`src/tom/gpu.c`, TEST_EXPORTS only): cycles outside Doom's
+    three spin loops (windows in the tool, none in `src/`), normalised by cycles/field (442,718 =
+    GPU saturated). The only instrument that moves below the game's 2-field floor. Cross-checks:
+    `--option virtualjaguar_risc_idle_skip=disabled` must give identical numbers; `--no-arm` leaves
+    the census off (overhead timing). `--measure-only --print-baseline` re-measures.
+  - Checkered Flag: loads `states/Checkered Flag (1994).state.auto` (rzip, extracted by the
+    Makefile), no scripted input. Reads the frame-cap budget `$43B0` and fields per game frame
+    (`$41AC` is a 32-bit counter). **The budget is a game-mode variable, not a load output** (0 boot,
+    1 first menu, 2 race; reads 2 here), so the gate is fields/game-frame vs cap (budget+1):
+    3.000 today; FAIL > baseline+0.25 (all three timing options: 5.4; pipeline alone: 4.9) or if the
+    budget rises above baseline; WARN on more overrun frames than baseline (plan 5.3: budget-1/overrun
+    in heavy scenes needs reporter/BigPEmu corroboration).
+- `test/tools/bus_census_probe` + `test/tools/contention_model.py` — **timing-campaign S2 bus census**
+  (not in `make test`; build with `make TEST_EXPORTS=1 BENCH_PROFILE=1 test/tools/bus_census_probe`
+  — BENCH_PROFILE only for blitter phrase counts, accurate blitter pinned by the tool). Core side:
+  `vjtrace_bus_*` (`src/core/vjtrace.c`, VJ_TRACE only, release objects byte-identical): per-halfline
+  68K bus cycles/clocks, GPU external transactions, DSP 16-bit transactions, OP occupancy (model
+  rule, UNGATED by dram_timing), RELEASE/BUSHI/DMAEN counts, split work/spin by `--m68k-win`
+  / `--dsp-win` / gpu_busy windows. Writes per-halfline CSV (`--out`) + per-field flips
+  (`--frames-csv`) + hot PCs with code bytes; `--disasm-gpu/--disasm-dsp ADDR:N`. The model script
+  multiplies that traffic by the fixed latency function (plan S2, `gpu-timing-spec.md` §15).
+  `VJ_S2_INJECT=1|2|3` (low/central/high, VJ_TRACE builds) auto-arms the census and charges GPU
+  external accesses that function so any tool (S0 gate, CF canary) sees the result — a one-shot
+  cross-check, never a tuning knob. Doom 68K wait loops: `9C80:9C8A 4662:4670` (GPU done flag),
+  `E36A:E386 E30E:E336` (dspfinished), `12F74:12F80 4670:4688` ($279D4); DSP idle `F1B092:F1B0A0`.
+- `test/tools/corpus_ab_sweep.sh` — A/B two cores across a ROM corpus, comparing the **full**
+  framebuffer hash stream: `corpus_ab_sweep.sh <base-core> <new-core> [rom-dir]`
+  (`FRAMES`, `TMO`, `VJ_ROMS`). Use it before merging anything that touches rendering. Two guards,
+  both earned: **every run is under a timeout** (Chroma-Luma Color Pick hangs `retro_run` forever,
+  #659 — the first sweep of this kind wedged on it for 2h23m emitting nothing, which is how #641's
+  regression reached develop), and it compares the hash stream rather than the transition **count**
+  (Super Burnout reads 143 transitions on both sides of #632 while rendering different pixels, so a
+  count comparison calls a real change "no change"). Exit 1 on any SKIP: an unchecked ROM must not
+  look like a clean sweep. `AUDIO=1` also hashes each frame's audio (`frame_hash_ab --audio-hash`)
+  and reports video/audio differing-frame counts -- use it for any DSP/audio change; `ARGS="--bios
+  --option ..."` passes extra args to both arms. Only top-level ROMs in the dir are swept: for a
+  parallel run, symlink chunks of the corpus into scratch dirs (never into the ROM tree).
+- `test/sram_test.sh` — SRAM round-trip.
+- `test/tools/cd_boot_matrix.sh` — per-title CD boot-stage matrix (HLE + BIOS) vs
+  `docs/cd-boot-matrix.md`. Env: `CD_MATRIX_FRAMES CD_MATRIX_TIMEOUT CD_MATRIX_MAX_RUNS
+  CD_MATRIX_LOGDIR CD_MATRIX_OUT CD_MATRIX_ROMS_ROOT`; chunked/resumable. Rows stamped with build
+  id (`<!-- build:<rev> -->`); resume skips only same-build rows, re-runs others. (Resuming from
+  an older build used to resurrect ancient rows as "fresh" — the phantom Battle Morph bios
+  `? (pc_escape)` `final_pc=$8FBFB758` was such a stale row.)
+- `test/tools/cart_boot_matrix.sh` (cart counterpart; classifier in `test/tools/cart_classify.sh`,
+  probe `cart_boot_probe.c`): BIOS-mode rows are scored from the boot-ROM -> cart handoff
+  (`--post-handoff N`, cap `CART_MATRIX_BIOS_BOOT_FRAMES`, default +700 frames), classes
+  `GAME_CODE`/`BIOS_REJECT` (boot ROM halted on `BRA.S *`, never handed off: red "Jaguar" screen,
+  an authentic reject)/`? (bios_trap)` (cart ran, PC fell back into `$E00000`)/`? (...)`/`LOAD_FAIL`.
+  `bios_ran=0` (headerless RAM-loaded `.jag`, e.g. Music Demo) has no boot phase: whole run scored.
+  Crash-watchdog signatures are never handoff-relative (an early escape is a real bug, #853).
+- `test/tools/matrix_diff.py OLD.md NEW.md` — never-backward gate (#749) between two copies of the
+  same matrix (cart or CD): prints regressed / still-asymmetric / improved, exit 1 on any backward
+  stage move or new crash-watchdog signature, 2 on parse error. `BIOS_REJECT` ranks equal to
+  `GAME_CODE` (GAME_CODE -> BIOS_REJECT = lateral scoring correction; HLE GAME_CODE / BIOS
+  BIOS_REJECT is not an asymmetry). Release-time, corpus machine only
+  (`docs/release-process.md`). Self-test `test/test_matrix_diff.sh` runs in `make test`.
+- CD trace ring: option `virtualjaguar_cd_trace` (or env `VJ_CD_TRACE=1`) records
+  `DSA_TX/DSA_RX/SEEK_START/SEEK_DONE/FIFO_FILL/FIFO_DRAIN/STOP/HLE_READ`; dumped on
+  `cd_seek_wedge` or on request.
+- `test/tools/cd_wedge_probe.c` — catches intermittent CD lockups: detects a frozen framebuffer
+  (`--arm N --freeze-frames N`, script repro with `--press`), dumps 68K regs, pcQueue traceback
+  ring, CD counters + trace ring, RAM hexdump around stuck PC; exits 42 when caught. `--ram-dump
+  BASE` writes full 2MB main-RAM + GPU-RAM at wedge; `--snap FRAME` (repeatable, `--snap-prefix
+  BASE`) for clean-vs-wedged diffing. Found Hover Strike instant-CD_read code-stomp and B-skip
+  stale-GPU-IRQ-latch corruption. Caveat: a static loading screen can false-positive short freeze
+  windows — confirm with `--freeze-frames 900`.
+- `test/tools/cd_visual_verify.c` — automated visual+audio verify for CD titles (`make cd-visual
+  CD_VISUAL_DISC=<image.cue>`): per-second frame-motion timeline, non-black coverage, audio RMS,
+  periodic PPM screenshots (`sips -s format png` to view). Replaces most "boot it and look"
+  checks. Headless read-path caveat still applies for final sign-off.
+- `test/tools/netlink_discover_probe.c` (`--selftest`) — validates LAN link-discovery beacon
+  (`src/jerry/jlink_discover.c`). Lives inside the core-adjacent binary on purpose: macOS grants
+  Local Network permission **per binary**, so a probe under `python3`'s identity can pass while
+  the shipped binary is denied (bit the #500 CI fix once). `netlink_discover_pair.sh` drives two
+  instances, PID-spreading the discovery port (`VJ_DISC_PORT`, `JLinkDiscPort()`) so parallel CI
+  runs don't collide on `JLINK_DISC_PORT` (42170). `--selftest` exits 77 when same-host broadcast
+  isn't available in the sandbox (some macOS CI runners) — a skip, not a failure.
+  `netlink_rebuild_witness.c` proves the `SET_CORE_OPTIONS_V2` rebuild path (option-visibility
+  re-push on link-mode change) executes.
+- `test/tools/netlink_sim.c` — deterministic two-instance RetroArch-netpacket simulator (virtual clock,
+  not part of `make test`). Measures the netlink reply wait without host-load noise: a core built from a
+  THROWAWAY worktree patched by `netlink_sim_clockpatch.py` (clock/sleep + byte-event hooks, never
+  applied to `src/`). Doom 2P deathmatch tics/s is the headline number: a tic is 12 one-way single-byte
+  hops (6 per side) and must fit a whole number of video frames, so rates sit on 60/k plateaus
+  (30/20/15/12 tics/s). Knobs: `--delay-ms/--jitter-ms/--spike-pct/--spike-ms`, `--loss-pct` with
+  `--rto-ms` (TCP) or `--udp-rto-ms` (UDP+retransmit model), `--emu-ms`, `--pump-us` (cost of one
+  `poll_receive`; results are sensitive to it, keep it identical across arms), `--audio-block-ms`
+  (frontend cost AFTER the core's frame-end hook), `--btrace` (per-byte link events), `--log` (core log
+  incl. the 5 s `link stats` line), `--corrupt N:XX` (flip one in-flight byte). Every arm of a comparison
+  must use the same flags; `--emu-ms 2` is optimistic for Doom at 2x, also run 6.
+
+## vjtrace flight recorder (dev-build-only)
+
+Event ring + memory watch (`src/core/vjtrace.h`/`.c`): `make TEST_EXPORTS=1` defines
+`VJ_TRACE`; plain `make` compiles every `VJT_*` to nothing and exports zero vjtrace symbols
+(costs nothing shipped). Every harness inherits tracing via `trace_probe_attach()`
+(`test/harness/trace_probe.h`; `test/tools/vjtrace_smoke.c` = generic driver). Flags:
+`--trace-out FILE` (binary ring at exit), `--watch A[:LEN][:r|w|rw]` (memory watch, max 16),
+`--field-csv FILE` (one row/frame: IRQ/GPU/OP/blitter counters, pad state, FB hash),
+`--snap FRAME` (VJSN snapshot), `--mark FRAME:TAG` (host marker event).
+
+Analyzer CLIs (offline, no core/harness dep): `trace_dump` (print/filter a ring by
+`--type/--who/--frame`), `trace_diff` (structural diff of two rings, tolerant of frame offset),
+`trace_memdiff` (diff two `--snap` VJSN files by section), `field_diff` (row/col diff of two
+`--field-csv`). `test/tools/vjtrace_selftest.sh` is part of `make test`.
+
+**Ring sizing:** default `VJ_TRACE_RING` = 1<<20 records; fills fast (OP_OBJECT/OP_LIST_START
+emit unconditionally, ~2,578 events/frame on `test/roms/yarc.j64`, ROM-dependent). A 1800-frame
+run needs ~4.6M records → set `VJ_TRACE_RING=6000000`. Both `trace_dump`/`trace_diff` print
+`WARNING: ring wrapped` to stderr when a dump lost events — don't treat a clean-looking dump as
+complete without checking.
+
+**Coverage caveats** (authoritative in vjtrace.h WATCH COVERAGE block): GPU/DSP writes to their
+own local RAM (`$F03000-$F03FFF` / `$F1B000-$F1CFFF`) never route through watched dispatch —
+invisible to `--watch`; only accesses through `JaguarRead/WriteByte/Word/Long` and the 68K bus
+fast path are covered. A 32-bit 68K access = ONE record for main RAM/cart ROM but TWO (at `addr`
+and `addr+2`) for TOM/JERRY/CDROM/unknown → always round a watch's low bound down to a multiple
+of 4.
+
+## Audio / DSP work — required tests
+
+**Any change to `src/jerry/dac.c`, `src/jerry/dsp.c`, the HLE BIOS DSP/audio path in
+`src/core/jaguar.c`, or the DSP IRQ return-address logic MUST clear BOTH audio tests.** A
+clipping check alone is insufficient: PR #170 (closed) took Iron Soldier 2 from 17% saturated to
+RMS=521 (silent) and the clipping test passed because silence has 0% saturation.
+
+Required before declaring an audio change done:
+
+1. `make TEST_EXPORTS=1 test` exits 0. Both `test_audio_clipping` and `test_audio_presence` are
+   in the suite. Presence on IS1 uses develop's envelope (`--rms-floor 200 --rms-ceiling 25000`);
+   if your change moves IS1's RMS outside that band you've changed audio behavior — verify intent.
+2. Sanity-check that previously-clipping titles (Skyhammer, IS2) didn't go loud-broken → silent-
+   broken. Both fixed as of 2026-08-05 by the MMULT secondary-bank fix; both assert clean.
+   Skyhammer `(World).j64`: 0.000% saturated, window RMS 3079.8, first audio frame 171.
+3. **Verify in RetroArch on a real game.** Headless can't tell music from structured noise at the
+   right RMS, nor catch BIOS-mode crashes (PR #170's BIOS crash + HLE silence were invisible to
+   the suite).
+
+Do not relax thresholds in `test_audio_clipping.c` / `test_audio_presence.c` to pass. A real fix
+that legitimately quiets a known-broken title is a separate deliberate baseline update — call it
+out in the commit.
+
+## Runtime crash watchdog (`src/core/crash_detect.c`)
+
+Runs once/frame from `retro_run`, logs to RetroArch log on these signatures. Option
+`virtualjaguar_crash_detect = enabled` (default) / `disabled` / `verbose` (adds a state
+heartbeat every 600 frames). Cost enabled: one indirect call + ~256-px hash/frame.
+
+- `gpu_pc_escape` — GPU PC outside `[$F03000,$F03FFF] ∪ [$0,$E3FFFF]` (matches JaguarReadX
+  decoding: main RAM mirrors bottom 8MB, cart ROM, boot ROM).
+- `dsp_pc_escape` — DSP PC outside `[$F1B000,$F1CFFF] ∪ [$0,$E3FFFF]`, tested on the **raw** PC (no
+  24-bit mask, unlike the GPU): DSPExec's own bail-out refuses a high-byte PC, so it executes
+  nothing. The mask hid Music Demo's HLE runaway to `$C1903000` (#853).
+- `inframe_hang` — fired at blit dispatch (not per frame) when `B_COUNT` asks for >2^24 pixels,
+  counted the way the accurate (default) engine runs it: outer 0 = 65536 lines (JTRM), inner 0 =
+  one step (≤64 px — INNER.NET's zero/underflow detect, which `BlitterMidsummer2` matches;
+  Williams/Telegames carts write `B_COUNT=0` at boot and run fine). Also fires with
+  `never_ends=1` for a blit whose inner counter never decrements: phrase mode below 8bpp, where
+  INNER.NET's decrement is `dstxp[0]` and phrase-aligned X keeps it 0 — real hardware never
+  finishes it either (#800). `approx=1` marks a hang whose memory effect below is only a
+  one-pass approximation (`BlitterNeverEndsApprox`). Policy: hang the emulated blitter, never the
+  host -- the accurate engine runs the stuck step for one destination wrap period (exact when
+  the step is idempotent on memory), then `B_CMD` reads busy and further starts are ignored
+  until reset (`test/tools/test_blitter_hung`; saved in the v16 `"BLH1"` chunk). Known limit: on
+  hardware a `B_COUNT` write while hung would un-stick it; not modelled. Absurd-size blits are
+  still run synchronously and can keep `retro_run` from returning for hours; this line is logged
+  *before* the blit runs. No real-ROM reproducer remains: Music Demo (ScatoLOGIC) `--bios`
+  (#794, `approx=1`) was a misloaded raw binary (fixed by #818, now `test_raw_binary_boot`), and
+  Native Demo (bin) HLE reached the blit only through a GPU runaway into data that the #611 NORMI
+  fix reshuffled. The synthetic test covers both engines.
+  Matrix runs killed at the wall-clock cap carry it in their evidence column.
+  - Seen as garbage blits from a runaway 68K whose exception frames land on the blitter's
+    `$F0A238` mirror. Uploaded executables (raw BJL/.abs) that end in ILLEGAL used to do this in
+    HLE; JaguarReset now parks vector 4 at `$1000` (`test/tools/test_upload_illegal_park`, #800).
+  - A raw binary parked at `$1000` early is often a wrong inferred load base, not a bad title:
+    `file.c` picks between overlapping candidate bases by entry-point consistency (JSR targets
+    right after an RTS). `test/tools/test_raw_binary_boot --expect-base` pins it (#818).
+- `test/tools/cart_boot_matrix.sh` runs the probe's default **Fast** blitter. Sweep the shipped
+  default with `CART_MATRIX_PROBE_ARGS="--option virtualjaguar_usefastblitter=disabled"` plus an
+  explicit `CART_MATRIX_OUT` (args are folded into the row cache id and default log dir).
+- `gpu_wedge` / `dsp_wedge` — flagged running but **zero opcodes** for ≥180 / 600 frames
+  (`gpu_exec_opcode_count` / `dsp_exec_opcode_count`). A stable sampled PC alone is NOT a wedge:
+  deterministic slice budgets land the per-frame PC on the same instruction of a healthy
+  wait/spin loop (Super Burnout spins ~446k GPU ops/frame at one sampled PC — the #378 false
+  positive; regression `test/tools/test_wedge_spin`).
+- `video_stall` — FB hash unchanged 300 frames while a processor runs.
+- `cd_seek_wedge` — FIFO drain frozen 300 frames while a processor runs AND the drive still owes
+  data: a seek outstanding, or a transfer still open (BUTCH low byte bits 0+1 = master + FIFO IRQ
+  armed, AND I2CNTRL bit 2 = FIFO data enabled); dumps the CD trace ring. A game ends a transfer
+  by clearing BUTCH bit 0 (Myst, Primal Rage, BrainDead 13 …) or I2CNTRL bit 2 (Philia); those
+  idle drives used to fire it (#741). The line prints `butch_int=`/`i2s_ctrl=`. Pinned by
+  `test/test_crash_detect_cd_wedge` (CI) + `test/tools/cd_seek_wedge_regress.sh` (private discs).
+  `test/test_cd_bios_boot` FAILs a disc when the watchdog fired (`CrashDetectCDSeekWedgeFires()`,
+  sticky, `[CD-WEDGE]` line) -- its PC checks alone pass on a dead transfer (#799).
+
+Triaging "X crashes/hangs/black screen": the RetroArch log shows the signature — no save state
+or input recording needed. **Add new signatures here when you find a recurring failure mode not
+already covered**; don't sprinkle one-off `LOG_ERR` across subsystem files.
+
+## Acid suite CI gating
+
+"Acid suite (linux x86_64)" can show `conclusion: failure` for two unrelated reasons — read the
+summary first:
+
+- `make -C test/acid test` exits non-zero by design (returns FAIL count). Job uses `set +e` and
+  gates on `check-baseline.py`. Real regression = `Regressions: N` (N>0) in `acid-summary.txt`.
+- Conclusion `failure` with `OK: no regressions` in step output = the artifact-upload step timed
+  out (`Operation could not be completed within the specified time`). Re-run the job; no code action.
+
+## Performance / profiling
+
+`make benchmark` runs `test/tools/test_benchmark` headless vs a fixed ROM (default
+`test/roms/yarc.j64`, 600 frames), prints FPS / ms-per-frame. Use as a same-host
+commit-to-commit delta — don't compare across machines. Full guide: `docs/profiling.md`
+(Instruments / `perf` / flame graphs, SIMD A/B knob).
+
+**Measurement hazards:** concurrent `make` swaps the dylib mid-sweep; sequential A/B measures
+host drift (an -O3 "+12.5%" flipped to -11.7% when interleaved) — always A/B/B/A, check `uptime`
+first.
+
+**Frame-time distribution (stutter, not average speed):** `test/tools/frame_cost_probe` gives the
+per-frame ms CSV + p50/p95/p99/max and over-budget counts. An armed vjtrace gates the GPU/DSP idle
+skip OFF (`idleSkipActive`), so the default run measures skip-OFF whatever `risc_idle_skip` says;
+pass `--no-arm` to keep the skip live (event columns then read 0 — pair with an armed run of the same
+config and join on frame, the emulation is deterministic and the skip bit-exact). Feed the CSV to
+`app/tests/pacing_trace.cpp` to see what the app's pacer does with that cost trace (uneven image gaps,
+vsync release/restore cycles); `virtualjaguar --perf-frames N` with `VJ_PERF_CSV=f.csv` records the
+real thing (`iter_ms,emu_frames,swap_sync,underruns,input_lat_ms,present_lat_ms`; present = the swap that first shows a frame which polled the event; `--perf-input` injects a key every 30
+iterations so the latency column has samples; `--emu-thread on|off` picks the loop, #967). `--option k=v` lists in an `ssh` command run under zsh must be built in `bash` (zsh does not
+word-split `$OPTS`; the option is then silently not applied and the harness prints no `option` line).
+
+## App emulation thread tests (#967)
+
+The CTest label `emu_thread` (`app/cmake/VJEmuThreadTests.cmake`, plus the RA twins and `ach_event_unit` in
+`VJAchTests.cmake`) is what the ThreadSanitizer CI job runs. Locally the label runs on the normal build:
+`ctest --test-dir app/build -C Release -L emu_thread`. The CI job (`tsan` in `.github/workflows/app.yml`) configures
+`app/build-tsan` with `-DVJ_APP_TSAN=ON -DVJ_APP_LTO=OFF` (clang, RelWithDebInfo) and runs
+`TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1 suppressions=app/tests/tsan.supp" ctest --test-dir app/build-tsan -C RelWithDebInfo -L emu_thread --output-on-failure`
+(Linux only; `sudo sysctl vm.mmap_rnd_bits=28` first on a new runner kernel). Phase 2 added, on top of the phase 1 units and `smoke_*_threaded`:
+
+- **Units:** `core_events_unit` (the core-event queue: order, bounded log lines, content switch, two threads) and
+  `ach_event_unit` (`AchEvent`, an rc_client event copied across threads; in `app/cmake/VJAchTests.cmake`).
+- **RetroAchievements twins:** every RA test is registered through `vj_ra_test()` in `VJAchTests.cmake`, which adds
+  `<name>` (inline) and `<name>_threaded` (same run with `--emu-thread on`, label `emu_thread`; fixture names and the
+  saved-cheat data dir get a `_threaded` suffix so the chains never share state). A test with `PASS` is a control: its twin
+  fails only on `owner violation` or a TSan report. `ra_reply_owner_threaded` is threaded-only: login/game-load replies must run on the core owner,
+  serialized with frames. It requires the mock login/load/session requests and rejects off-thread address reads.
+  `ra_ui_client_access` and its threaded twin overlap owner-side hardcore/reset/evaluation commands with copied
+  dashboard/profile/Discord snapshots, achievement rows, and image URLs (`--ra-step FRAME:ui:stress`). They also
+  exercise unofficial/enabled toggles and password sign-in, and retain copied UI data across signout. Without
+  the shared client lock, TSan reports a race between the hardcore getter and setter. UI code must never retain
+  rcheevos pointers: use `clientSnapshot()` or the copied rows/URLs.
+- **Audio scope:** `debug_blitter_unit` also has the `emu_thread` label. Its concurrent producer/reader/clear
+  test covers the sample ring under TSan; the UI open flag is atomic. Windowed TSan hardcore toggles are
+  still required: they exercise the scope close callback and a freely running RA client while the UI pumps replies.
+- **Netplay:** `netplay_pair_threaded`, `netplay_pair_voicemodem_threaded`, `netplay_pair_mixed` (one threaded copy
+  linked to one single-thread copy) and `netplay_no_partner_threaded` (a copy quitting with no peer exits 1, not 3).
+  They are `RUN_SERIAL` and real-time: a "no link within 30s" under heavy host load is load, so re-run them alone
+  before reading anything into it.
+- **Busy spinner:** `smoke_busy_threaded` runs with `VJ_TEST_SLOW_CALL_MS=400` (the load `call()` sleeps that long on
+  the emulation thread, max 5000) and expects `[emu] busy: a call has taken over 250 ms`.
+- **Failed start:** `emu_thread_start_fallback` runs with `VJ_TEST_EMU_START_FAIL=1`, which takes the real failure
+  branch of `App::startEmuThread`: the run falls back inline and the debugger and GDB limits are lifted.
+
+## Headless framebuffer caveat
+
+The miniretro harness in `test/regression_test.sh` doesn't expose the same composited
+framebuffer RetroArch reads. Symptom: `jag_240p_test_suite` main menu shows ~1k non-black pixels
+via miniretro vs tens of thousands via RetroArch. Treat as a **headless read-path / presentation
+bug** (OP+blitter output vs what the host reads), not a 240p timing or `__muldi3` perf bug.
+Verify against RetroArch before treating a regression as real.
